@@ -1,6 +1,6 @@
 """
 scripts/create_dashboard.py
-✅ AI Signals (39 cols) + LTP + Alert + All Tabs + Edit Entry/SL/TP
+✅ AI Signals (39 cols) + LTP + Alert + All Tabs + Edit Entry/SL/TP + SWRSI Tab
 """
 
 import os
@@ -16,7 +16,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="9.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="9.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -28,12 +28,18 @@ def get_mongo_collection(collection_name=None):
     except: return None
 
 # ================================
-# API Routes (unchanged)
+# API Routes
 # ================================
 @app.get("/api/health")
 async def health():
     col = get_mongo_collection()
-    return {"status": "ok", "mongodb": "connected" if col else "not configured"}
+    swrsi_col = get_mongo_collection("swrsi_signals") if MONGODB_URI else None
+    swrsi_count = swrsi_col.count_documents({}) if swrsi_col else 0
+    return {
+        "status": "ok", 
+        "mongodb": "connected" if col else "not configured",
+        "swrsi_signals": swrsi_count
+    }
 
 @app.get("/api/market-status")
 async def market_status():
@@ -89,6 +95,18 @@ async def get_signals(date: str = Query(None), signal: str = Query(None), symbol
     cursor = collection.find(query, {'_id': 0}).sort('final_combined_score', -1).limit(limit)
     return {"data": list(cursor)}
 
+@app.get("/api/swrsi")
+async def get_swrsi():
+    """SWRSI Signals from MongoDB"""
+    col = get_mongo_collection("swrsi_signals")
+    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    data = list(col.find({}, {'_id': 0}).sort('composite_score', -1))
+    return {
+        "signals": data,
+        "total_signals": len(data),
+        "last_run": datetime.now().isoformat()
+    }
+
 @app.get("/api/stats")
 async def get_stats(date: str = Query(None)):
     collection = get_mongo_collection()
@@ -132,7 +150,7 @@ async def update_trade(symbol: str = Query(...), date: str = Query(...), entry_p
     return {"updated": result.modified_count, "symbol": symbol, "date": date}
 
 # ================================
-# HTML Dashboard (39 Columns)
+# HTML Dashboard (39 Columns + SWRSI Tab)
 # ================================
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -150,10 +168,15 @@ async def dashboard():
         .header h1 { font-size: 2.2em; background: linear-gradient(90deg, #00d4ff, #7b2ff7, #ff6b6b); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .alert-box { background: #ff4757; color: #fff; padding: 15px; border-radius: 10px; margin: 15px 0; text-align: center; font-size: 1.3em; font-weight: bold; display: none; animation: pulse 1s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
-        .tabs { display: flex; margin-bottom: 20px; background: #111; border-radius: 10px; overflow: hidden; }
-        .tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; border-right: 1px solid #222; color: #aaa; }
+        .tabs { display: flex; margin-bottom: 20px; background: #111; border-radius: 10px; overflow: hidden; flex-wrap: wrap; }
+        .tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; border-right: 1px solid #222; color: #aaa; min-width: 100px; }
         .tab.active { background: #1a1a2e; color: #00d4ff; font-weight: bold; }
+        .tab.swrsi-tab.active { background: #2a1a4e; color: #ff6b6b; }
         .controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; align-items: center; }
+        .stats-bar { display: flex; gap: 15px; margin-bottom: 15px; flex-wrap: wrap; }
+        .stat-card { background: #1a1a2e; padding: 15px 20px; border-radius: 10px; text-align: center; min-width: 120px; }
+        .stat-card .value { font-size: 1.5em; font-weight: bold; color: #00d4ff; }
+        .stat-card .label { font-size: 0.7em; color: #888; margin-top: 5px; }
         select, input, button { padding: 10px 15px; background: #1a1a2e; color: #fff; border: 1px solid #333; border-radius: 8px; }
         button { cursor: pointer; background: #0f3460; }
         table { width: 100%; border-collapse: collapse; font-size: 0.7em; background: #111122; border-radius: 10px; overflow: hidden; }
@@ -169,6 +192,13 @@ async def dashboard():
         .signal-H { color: #ffd700; }
         .signal-S { color: #ff4757; }
         .signal-SS { color: #ff0000; font-weight: bold; }
+        .score-strong { color: #00ff88; font-weight: bold; }
+        .score-moderate { color: #ffd700; }
+        .score-weak { color: #ffa500; }
+        .swrsi-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; font-weight: bold; }
+        .swrsi-strong { background: #00ff88; color: #000; }
+        .swrsi-moderate { background: #ffd700; color: #000; }
+        .swrsi-weak { background: #ffa500; color: #000; }
         @media (max-width: 768px) { .header h1 { font-size: 1.5em; } }
     </style>
 </head>
@@ -180,12 +210,13 @@ async def dashboard():
     <div id="alertBox" class="alert-box">⚠️ MARKET CLOSING IN 10 MINUTES!</div>
     <div class="tabs">
         <div class="tab active" onclick="switchTab('ai_signals')">🤖 AI Signals</div>
+        <div class="tab swrsi-tab" onclick="switchTab('swrsi')">🔍 SWRSI</div>
         <div class="tab" onclick="switchTab('support')">📊 S/R</div>
         <div class="tab" onclick="switchTab('macd')">📉 MACD</div>
         <div class="tab" onclick="switchTab('ema')">📈 EMA 200</div>
         <div class="tab" onclick="switchTab('buy')">✅ Daily Buy</div>
     </div>
-    <div class="controls">
+    <div class="controls" id="aiControls">
         <label>📅 Date:</label>
         <select id="dateSelect" onchange="loadCurrentTab()"><option value="">Latest</option></select>
         <label>🔍 Symbol:</label>
@@ -193,6 +224,11 @@ async def dashboard():
         <button onclick="loadCurrentTab()">🔄 Refresh</button>
         <span id="recordCount" style="color:#888;"></span>
     </div>
+    <div class="controls" id="swrsiControls" style="display:none;">
+        <button onclick="loadSWRSI()">🔄 Refresh SWRSI</button>
+        <span id="swrsiRecordCount" style="color:#888;"></span>
+    </div>
+    <div class="stats-bar" id="swrsiStatsBar" style="display:none;"></div>
     <div style="overflow-x:auto;" id="dynamicTable"></div>
 
     <script>
@@ -216,12 +252,29 @@ async def dashboard():
         }
 
         async function loadDseLtp() {
-            try { const r = await fetch('/api/dse-ltp'); const j = await r.json(); if (j.status === 'live') dseLtpData = j.ltp_data || {}; else dseLtpData = {}; if (currentTab === 'ai_signals') renderTable(); } catch(e) {}
+            try { 
+                const r = await fetch('/api/dse-ltp'); 
+                const j = await r.json(); 
+                if (j.status === 'live') dseLtpData = j.ltp_data || {}; 
+                else dseLtpData = {}; 
+                if (currentTab === 'ai_signals') renderTable(); 
+                if (currentTab === 'swrsi') renderSWRSITable(); 
+            } catch(e) {}
         }
 
-        async function loadDates(c) { const r = await fetch(`/api/dates?collection=${c}`); const d = await r.json(); const s = document.getElementById('dateSelect'); s.innerHTML = '<option value="">Latest</option>'; d.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); }); }
+        async function loadDates(c) { 
+            const r = await fetch(`/api/dates?collection=${c}`); 
+            const d = await r.json(); 
+            const s = document.getElementById('dateSelect'); 
+            s.innerHTML = '<option value="">Latest</option>'; 
+            d.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); }); 
+        }
 
         async function loadCurrentTab() {
+            if (currentTab === 'swrsi') {
+                loadSWRSI();
+                return;
+            }
             const date = document.getElementById('dateSelect').value;
             const symbol = document.getElementById('symbolSearch').value;
             if (currentTab === 'ai_signals') {
@@ -241,14 +294,48 @@ async def dashboard():
             }
         }
 
+        async function loadSWRSI() {
+            const r = await fetch('/api/swrsi');
+            const j = await r.json();
+            currentData = j.signals || [];
+            
+            // Stats
+            const total = j.total_signals || 0;
+            const strong = currentData.filter(s => (s.weekly_strength_label || '') === 'Strong').length;
+            const moderate = currentData.filter(s => (s.weekly_strength_label || '') === 'Moderate').length;
+            const weak = currentData.filter(s => (s.weekly_strength_label || '') === 'Weak').length;
+            const highScore = currentData.filter(s => (s.composite_score || 0) >= 70).length;
+            
+            document.getElementById('swrsiStatsBar').innerHTML = `
+                <div class="stat-card"><div class="value">${total}</div><div class="label">Total Signals</div></div>
+                <div class="stat-card"><div class="value">${highScore}</div><div class="label">High Score (≥70)</div></div>
+                <div class="stat-card"><div class="value">${strong}</div><div class="label">Strong Weekly</div></div>
+                <div class="stat-card"><div class="value">${moderate}</div><div class="label">Moderate Weekly</div></div>
+                <div class="stat-card"><div class="value">${weak}</div><div class="label">Weak Weekly</div></div>
+            `;
+            document.getElementById('swrsiRecordCount').textContent = `(${total} signals)`;
+            
+            renderSWRSITable();
+        }
+
         function switchTab(t) {
             document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
             event.target.classList.add('active');
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
-            const map = { ai_signals: 'daily_ai_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
-            loadDates(map[t]);
-            loadCurrentTab();
+            
+            // Toggle controls
+            document.getElementById('aiControls').style.display = t === 'swrsi' ? 'none' : 'flex';
+            document.getElementById('swrsiControls').style.display = t === 'swrsi' ? 'flex' : 'none';
+            document.getElementById('swrsiStatsBar').style.display = t === 'swrsi' ? 'flex' : 'none';
+            
+            if (t === 'swrsi') {
+                loadSWRSI();
+            } else {
+                const map = { ai_signals: 'daily_ai_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
+                loadDates(map[t]);
+                loadCurrentTab();
+            }
         }
 
         function getSignalClass(s) {
@@ -259,6 +346,24 @@ async def dashboard():
             if (s.includes('STRONG SELL')) return 'signal-SS';
             if (s.includes('SELL')) return 'signal-S';
             return '';
+        }
+
+        function getStrengthClass(s) {
+            if (!s) return '';
+            const lower = s.toLowerCase();
+            if (lower === 'strong') return 'score-strong';
+            if (lower === 'moderate') return 'score-moderate';
+            if (lower === 'weak') return 'score-weak';
+            return '';
+        }
+
+        function getStrengthBadge(s) {
+            if (!s) return '';
+            const lower = s.toLowerCase();
+            if (lower === 'strong') return '<span class="swrsi-badge swrsi-strong">Strong</span>';
+            if (lower === 'moderate') return '<span class="swrsi-badge swrsi-moderate">Moderate</span>';
+            if (lower === 'weak') return '<span class="swrsi-badge swrsi-weak">Weak</span>';
+            return s;
         }
 
         function startEdit(symbol, date, entry, sl, tp, i) { editingRow = { symbol, date, rowIndex: i }; renderTable(); }
@@ -272,6 +377,58 @@ async def dashboard():
             await fetch(`/api/update-trade?${params}`, { method: 'PUT' });
             editingRow = null;
             loadCurrentTab();
+        }
+
+        function renderSWRSITable() {
+            const div = document.getElementById('dynamicTable');
+            if (!currentData.length) { 
+                div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; 
+                return; 
+            }
+            
+            let html = `<table><thead><tr>
+                <th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Composite Score</th>
+                <th>Weekly Div</th><th>Weekly Label</th><th>Weekly Score</th>
+                <th>Prev Low</th><th>Curr Low</th><th>Prev RSI</th><th>Curr RSI</th>
+                <th>Price Drop%</th><th>RSI Gain</th>
+                <th>Prev Week</th><th>Curr Week</th>
+                <th>Daily Div</th><th>Daily Strength</th>
+                <th>Daily Last RSI</th><th>Daily Prev RSI</th>
+                <th>Signal Date</th>
+            </tr></thead><tbody>`;
+            
+            currentData.forEach((r, i) => {
+                const ltp = dseLtpData[r.symbol] || null;
+                const ltpDisplay = ltp ? `<span style="color:#00ff88;font-weight:bold;">${ltp.toFixed(2)}</span>` : '-';
+                const scoreClass = (r.composite_score || 0) >= 70 ? 'score-strong' : (r.composite_score || 0) >= 45 ? 'score-moderate' : 'score-weak';
+                
+                html += `<tr>
+                    <td>${i+1}</td>
+                    <td><strong>${r.symbol || ''}</strong></td>
+                    <td>${r.sector || ''}</td>
+                    <td>${ltpDisplay}</td>
+                    <td class="${scoreClass}"><strong>${(r.composite_score || 0).toFixed(0)}</strong></td>
+                    <td>${r.weekly_divergence || ''}</td>
+                    <td>${getStrengthBadge(r.weekly_strength_label)}</td>
+                    <td>${r.weekly_strength_score || 0}</td>
+                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td>
+                    <td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
+                    <td>${r.weekly_prev_date || ''}</td>
+                    <td>${r.weekly_curr_date || ''}</td>
+                    <td>${r.daily_divergence_type || ''}</td>
+                    <td>${getStrengthBadge(r.daily_divergence_strength)}</td>
+                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${r.signal_date || r.analysis_date || ''}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+            div.innerHTML = html;
+            document.getElementById('recordCount').textContent = `(${currentData.length} signals)`;
         }
 
         function renderTable() {
@@ -369,7 +526,7 @@ async def dashboard():
 
         async function deleteRecord(symbol, date, tab = 'ai_signals') {
             if (!confirm(`Delete ${symbol}?`)) return;
-            const map = { ai_signals: 'daily_ai_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
+            const map = { ai_signals: 'daily_ai_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals', swrsi: 'swrsi_signals' };
             await fetch(`/api/delete-signal?collection=${map[tab]}&symbol=${symbol}&date=${date}`, { method: 'DELETE' });
             loadCurrentTab();
         }
