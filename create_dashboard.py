@@ -1,6 +1,6 @@
 """
 scripts/create_dashboard.py
-✅ AI Signals (39 cols) + LTP + Alert + All Tabs + Edit Entry/SL/TP + SWRSI Tab
+✅ AI Signals (39 cols) + LTP + Alert + All Tabs + Edit Entry/SL/TP + SWRSI Tab (with Date Filter)
 """
 
 import os
@@ -16,7 +16,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="9.1.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="9.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -80,6 +80,14 @@ async def get_dates(collection: str = Query("daily_ai_signals")):
     dates = col.distinct('analysis_date')
     return sorted(dates, reverse=True)
 
+@app.get("/api/swrsi/dates")
+async def get_swrsi_dates():
+    """SWRSI collection থেকে available dates"""
+    col = get_mongo_collection("swrsi_signals")
+    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    dates = col.distinct('analysis_date')
+    return sorted(dates, reverse=True)
+
 @app.get("/api/signals")
 async def get_signals(date: str = Query(None), signal: str = Query(None), symbol: str = Query(None), min_score: float = Query(0), limit: int = Query(1000)):
     collection = get_mongo_collection()
@@ -96,14 +104,33 @@ async def get_signals(date: str = Query(None), signal: str = Query(None), symbol
     return {"data": list(cursor)}
 
 @app.get("/api/swrsi")
-async def get_swrsi():
-    """SWRSI Signals from MongoDB"""
+async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
+    """SWRSI Signals from MongoDB with date filter"""
     col = get_mongo_collection("swrsi_signals")
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-    data = list(col.find({}, {'_id': 0}).sort('composite_score', -1))
+    
+    query = {}
+    if date: 
+        query['analysis_date'] = date
+    else:
+        # Latest date
+        latest = list(col.find().sort('analysis_date', -1).limit(1))
+        if latest: 
+            query['analysis_date'] = latest[0]['analysis_date']
+    
+    if symbol: 
+        query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
+    
+    data = list(col.find(query, {'_id': 0}).sort('composite_score', -1))
+    
+    # Available dates for dropdown
+    all_dates = sorted(col.distinct('analysis_date'), reverse=True)
+    
     return {
         "signals": data,
         "total_signals": len(data),
+        "available_dates": all_dates,
+        "current_date": date or (all_dates[0] if all_dates else None),
         "last_run": datetime.now().isoformat()
     }
 
@@ -150,7 +177,7 @@ async def update_trade(symbol: str = Query(...), date: str = Query(...), entry_p
     return {"updated": result.modified_count, "symbol": symbol, "date": date}
 
 # ================================
-# HTML Dashboard (39 Columns + SWRSI Tab)
+# HTML Dashboard (39 Columns + SWRSI Tab with Date Filter)
 # ================================
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -199,6 +226,8 @@ async def dashboard():
         .swrsi-strong { background: #00ff88; color: #000; }
         .swrsi-moderate { background: #ffd700; color: #000; }
         .swrsi-weak { background: #ffa500; color: #000; }
+        .date-nav { display: flex; gap: 5px; align-items: center; }
+        .date-nav button { padding: 5px 10px; font-size: 0.8em; }
         @media (max-width: 768px) { .header h1 { font-size: 1.5em; } }
     </style>
 </head>
@@ -225,7 +254,15 @@ async def dashboard():
         <span id="recordCount" style="color:#888;"></span>
     </div>
     <div class="controls" id="swrsiControls" style="display:none;">
-        <button onclick="loadSWRSI()">🔄 Refresh SWRSI</button>
+        <label>📅 Date:</label>
+        <select id="swrsiDateSelect" onchange="loadSWRSI()"><option value="">Latest</option></select>
+        <label>🔍 Symbol:</label>
+        <input type="text" id="swrsiSymbolSearch" onkeyup="loadSWRSI()" style="width:120px;" placeholder="Filter symbol...">
+        <div class="date-nav">
+            <button onclick="navigateSWRSIDate(-1)" title="Previous date">◀</button>
+            <button onclick="navigateSWRSIDate(1)" title="Next date">▶</button>
+        </div>
+        <button onclick="loadSWRSI()">🔄 Refresh</button>
         <span id="swrsiRecordCount" style="color:#888;"></span>
     </div>
     <div class="stats-bar" id="swrsiStatsBar" style="display:none;"></div>
@@ -236,6 +273,7 @@ async def dashboard():
         let currentData = [];
         let dseLtpData = {};
         let editingRow = null;
+        let swrsiDates = [];
 
         loadDates('daily_ai_signals');
         loadCurrentTab();
@@ -270,6 +308,35 @@ async def dashboard():
             d.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); }); 
         }
 
+        async function loadSWRSIDates() {
+            const r = await fetch('/api/swrsi/dates');
+            swrsiDates = await r.json();
+            const s = document.getElementById('swrsiDateSelect');
+            s.innerHTML = '<option value="">Latest</option>';
+            swrsiDates.forEach(v => {
+                const o = document.createElement('option');
+                o.value = v;
+                o.textContent = v;
+                s.appendChild(o);
+            });
+        }
+
+        function navigateSWRSIDate(direction) {
+            const select = document.getElementById('swrsiDateSelect');
+            const currentVal = select.value;
+            
+            if (!swrsiDates.length) return;
+            
+            let currentIndex = currentVal ? swrsiDates.indexOf(currentVal) : 0;
+            if (currentIndex === -1) currentIndex = 0;
+            
+            const newIndex = currentIndex + direction;
+            if (newIndex >= 0 && newIndex < swrsiDates.length) {
+                select.value = swrsiDates[newIndex];
+                loadSWRSI();
+            }
+        }
+
         async function loadCurrentTab() {
             if (currentTab === 'swrsi') {
                 loadSWRSI();
@@ -295,9 +362,34 @@ async def dashboard():
         }
 
         async function loadSWRSI() {
-            const r = await fetch('/api/swrsi');
+            const date = document.getElementById('swrsiDateSelect').value;
+            const symbol = document.getElementById('swrsiSymbolSearch').value;
+            
+            let url = '/api/swrsi?';
+            if (date) url += `date=${date}&`;
+            if (symbol) url += `symbol=${symbol}&`;
+            
+            const r = await fetch(url);
             const j = await r.json();
             currentData = j.signals || [];
+            
+            // Update dates dropdown
+            if (j.available_dates && j.available_dates.length > 0) {
+                swrsiDates = j.available_dates;
+                const s = document.getElementById('swrsiDateSelect');
+                if (s.options.length <= 1) {
+                    s.innerHTML = '<option value="">Latest</option>';
+                    swrsiDates.forEach(v => {
+                        const o = document.createElement('option');
+                        o.value = v;
+                        o.textContent = v;
+                        s.appendChild(o);
+                    });
+                }
+                if (j.current_date) {
+                    s.value = j.current_date;
+                }
+            }
             
             // Stats
             const total = j.total_signals || 0;
@@ -313,7 +405,7 @@ async def dashboard():
                 <div class="stat-card"><div class="value">${moderate}</div><div class="label">Moderate Weekly</div></div>
                 <div class="stat-card"><div class="value">${weak}</div><div class="label">Weak Weekly</div></div>
             `;
-            document.getElementById('swrsiRecordCount').textContent = `(${total} signals)`;
+            document.getElementById('swrsiRecordCount').textContent = `(${total} signals${j.current_date ? ' | ' + j.current_date : ''})`;
             
             renderSWRSITable();
         }
@@ -323,6 +415,7 @@ async def dashboard():
             event.target.classList.add('active');
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
+            document.getElementById('swrsiSymbolSearch').value = '';
             
             // Toggle controls
             document.getElementById('aiControls').style.display = t === 'swrsi' ? 'none' : 'flex';
@@ -330,6 +423,7 @@ async def dashboard():
             document.getElementById('swrsiStatsBar').style.display = t === 'swrsi' ? 'flex' : 'none';
             
             if (t === 'swrsi') {
+                loadSWRSIDates();
                 loadSWRSI();
             } else {
                 const map = { ai_signals: 'daily_ai_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
@@ -382,7 +476,7 @@ async def dashboard():
         function renderSWRSITable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { 
-                div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; 
+                div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found for this date</p>'; 
                 return; 
             }
             
