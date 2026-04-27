@@ -467,7 +467,7 @@ async def dashboard():
             if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
             
             // ✅ Filter out unwanted columns (saved_at, analysis_date, date duplicates)
-            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'saved_at'];
+            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'saved_at','symbol'];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             
             let html = `<table><thead><tr>
