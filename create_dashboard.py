@@ -1,7 +1,8 @@
 """
 scripts/create_dashboard.py
-✅ AI Signals (39 cols) + LTP + Alert + All Tabs + Edit Entry/SL/TP + SWRSI Tab
-✅ DSE Market: Sun-Thu 10AM-2:20PM, LTP every 60 seconds
+✅ AI Signals (37 cols) + LTP + Alert + All Tabs + Edit Entry/SL/TP + SWRSI Tab
+✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
+✅ Removed: saved_at, analysis_date from display
 """
 
 import os
@@ -11,13 +12,13 @@ from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="10.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="11.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -29,15 +30,18 @@ def get_mongo_collection(collection_name=None):
     except: return None
 
 # ================================
-# DSE Market Status (Sun-Thu, 10AM-2:20PM)
+# Bangladesh Timezone Helper
 # ================================
+BD_TIMEZONE = timezone(timedelta(hours=6))
+
+def get_bd_time():
+    """Get current Bangladesh time"""
+    return datetime.now(BD_TIMEZONE)
+
 def is_dse_market_open():
-    """DSE Market: রবি-বৃহস্পতি, সকাল ১০টা - দুপুর ২:২০টা"""
-    now = datetime.now()
+    """DSE Market: রবি-বৃহস্পতি, বাংলাদেশ সময় সকাল ১০টা - দুপুর ২:২০টা"""
+    now = get_bd_time()
     hour, minute, weekday = now.hour, now.minute, now.weekday()
-    
-    # Python: Monday=0, Sunday=6
-    # DSE Open: Sunday(6), Monday(0), Tuesday(1), Wednesday(2), Thursday(3)
     return (weekday in [6, 0, 1, 2, 3] and 
             ((hour == 10 and minute >= 0) or 
              (10 < hour < 14) or 
@@ -51,17 +55,17 @@ async def health():
     col = get_mongo_collection()
     swrsi_col = get_mongo_collection("swrsi_signals") if MONGODB_URI else None
     swrsi_count = swrsi_col.count_documents({}) if swrsi_col else 0
-    dse_open = is_dse_market_open()
     return {
         "status": "ok", 
         "mongodb": "connected" if col else "not configured",
         "swrsi_signals": swrsi_count,
-        "dse_market": "OPEN" if dse_open else "CLOSED"
+        "dse_market": "OPEN" if is_dse_market_open() else "CLOSED",
+        "bangladesh_time": get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
     }
 
 @app.get("/api/market-status")
 async def market_status():
-    now = datetime.now()
+    now = get_bd_time()
     hour, minute, weekday = now.hour, now.minute, now.weekday()
     
     is_open = is_dse_market_open()
@@ -70,12 +74,11 @@ async def market_status():
     time_to_close = (close_time - now).total_seconds()
     alert_10min = is_open and (0 < time_to_close <= 600)
     
-    # Next open day calculation
     if not is_open:
         if weekday == 3:  # Thursday
             next_open = "Sunday 10:00 AM"
         elif weekday in [4, 5]:  # Friday, Saturday
-            next_open = "Sunday 10:00 AM" if weekday in [4, 5] else "Tomorrow 10:00 AM"
+            next_open = "Sunday 10:00 AM"
         else:
             next_open = "Tomorrow 10:00 AM"
     else:
@@ -86,12 +89,13 @@ async def market_status():
         "alert_10min": alert_10min,
         "alert_message": "⚠️ DSE CLOSING IN 10 MINUTES! Review your positions." if alert_10min else "",
         "next_open": next_open,
+        "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S'),
         "timestamp": now.isoformat()
     }
 
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
-    now = datetime.now()
+    now = get_bd_time()
     
     if not is_dse_market_open():
         weekday = now.weekday()
@@ -102,6 +106,7 @@ async def get_dse_ltp():
         return {
             "status": "closed", 
             "message": f"DSE Closed. Opens {next_open}",
+            "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S'),
             "timestamp": now.isoformat()
         }
     
@@ -124,6 +129,7 @@ async def get_dse_ltp():
             "market": "DSE OPEN", 
             "total_symbols": len(ltp_data), 
             "ltp_data": ltp_data, 
+            "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S'),
             "timestamp": now.isoformat()
         }
     except Exception as e: 
@@ -241,7 +247,6 @@ async def dashboard():
         .tabs { display: flex; margin-bottom: 20px; background: #111; border-radius: 10px; overflow: hidden; flex-wrap: wrap; }
         .tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; border-right: 1px solid #222; color: #aaa; min-width: 100px; }
         .tab.active { background: #1a1a2e; color: #00d4ff; font-weight: bold; }
-        .tab.swrsi-tab.active { background: #2a1a4e; color: #ff6b6b; }
         .controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; align-items: center; }
         .stats-bar { display: flex; gap: 15px; margin-bottom: 15px; flex-wrap: wrap; }
         .stat-card { background: #1a1a2e; padding: 15px 20px; border-radius: 10px; text-align: center; min-width: 120px; }
@@ -262,15 +267,6 @@ async def dashboard():
         .signal-H { color: #ffd700; }
         .signal-S { color: #ff4757; }
         .signal-SS { color: #ff0000; font-weight: bold; }
-        .score-strong { color: #00ff88; font-weight: bold; }
-        .score-moderate { color: #ffd700; }
-        .score-weak { color: #ffa500; }
-        .swrsi-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; font-weight: bold; }
-        .swrsi-strong { background: #00ff88; color: #000; }
-        .swrsi-moderate { background: #ffd700; color: #000; }
-        .swrsi-weak { background: #ffa500; color: #000; }
-        .date-nav { display: flex; gap: 5px; align-items: center; }
-        .date-nav button { padding: 5px 10px; font-size: 0.8em; }
         @media (max-width: 768px) { .header h1 { font-size: 1.5em; } }
     </style>
 </head>
@@ -282,7 +278,7 @@ async def dashboard():
     <div id="alertBox" class="alert-box">⚠️ DSE CLOSING IN 10 MINUTES!</div>
     <div class="tabs">
         <div class="tab active" onclick="switchTab('ai_signals')">🤖 AI Signals</div>
-        <div class="tab swrsi-tab" onclick="switchTab('swrsi')">🔍 SWRSI</div>
+        <div class="tab" onclick="switchTab('swrsi')">🔍 SWRSI</div>
         <div class="tab" onclick="switchTab('support')">📊 S/R</div>
         <div class="tab" onclick="switchTab('macd')">📉 MACD</div>
         <div class="tab" onclick="switchTab('ema')">📈 EMA 200</div>
@@ -323,7 +319,6 @@ async def dashboard():
         checkMarketStatus();
         loadDseLtp();
         setInterval(checkMarketStatus, 60000);
-        // ✅ DSE Market Open থাকলে প্রতি ৬০ সেকেন্ডে LTP রিফ্রেশ
         setInterval(async () => {
             const res = await fetch('/api/market-status');
             const status = await res.json();
@@ -334,9 +329,9 @@ async def dashboard():
             const res = await fetch('/api/market-status');
             const s = await res.json();
             if (s.is_open) {
-                document.getElementById('marketStatus').innerHTML = '🟢 DSE MARKET OPEN (Sun-Thu, 10AM-2:20PM)';
+                document.getElementById('marketStatus').innerHTML = `🟢 DSE MARKET OPEN | Bangladesh Time: ${s.bangladesh_time || ''}`;
             } else {
-                document.getElementById('marketStatus').innerHTML = `🔴 DSE CLOSED | Opens ${s.next_open || 'next session'}`;
+                document.getElementById('marketStatus').innerHTML = `🔴 DSE CLOSED | Opens ${s.next_open || 'next session'} | BD Time: ${s.bangladesh_time || ''}`;
             }
             document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
         }
@@ -365,9 +360,7 @@ async def dashboard():
             swrsiDates = await r.json();
             const s = document.getElementById('swrsiDateSelect');
             s.innerHTML = '<option value="">Latest</option>';
-            swrsiDates.forEach(v => {
-                const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o);
-            });
+            swrsiDates.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); });
         }
 
         function navigateSWRSIDate(direction) {
@@ -422,19 +415,6 @@ async def dashboard():
                 }
                 if (j.current_date) s.value = j.current_date;
             }
-            const total = j.total_signals || 0;
-            const strong = currentData.filter(s => (s.weekly_strength_label || '') === 'Strong').length;
-            const moderate = currentData.filter(s => (s.weekly_strength_label || '') === 'Moderate').length;
-            const weak = currentData.filter(s => (s.weekly_strength_label || '') === 'Weak').length;
-            const highScore = currentData.filter(s => (s.composite_score || 0) >= 70).length;
-            document.getElementById('swrsiStatsBar').innerHTML = `
-                <div class="stat-card"><div class="value">${total}</div><div class="label">Total Signals</div></div>
-                <div class="stat-card"><div class="value">${highScore}</div><div class="label">High Score (≥70)</div></div>
-                <div class="stat-card"><div class="value">${strong}</div><div class="label">Strong Weekly</div></div>
-                <div class="stat-card"><div class="value">${moderate}</div><div class="label">Moderate Weekly</div></div>
-                <div class="stat-card"><div class="value">${weak}</div><div class="label">Weak Weekly</div></div>
-            `;
-            document.getElementById('swrsiRecordCount').textContent = `(${total} signals${j.current_date ? ' | ' + j.current_date : ''})`;
             renderSWRSITable();
         }
 
@@ -442,11 +422,9 @@ async def dashboard():
             document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
             event.target.classList.add('active');
             currentTab = t;
-            document.getElementById('symbolSearch').value = '';
-            document.getElementById('swrsiSymbolSearch').value = '';
-            document.getElementById('aiControls').style.display = t === 'swrsi' ? 'none' : 'flex';
-            document.getElementById('swrsiControls').style.display = t === 'swrsi' ? 'flex' : 'none';
-            document.getElementById('swrsiStatsBar').style.display = t === 'swrsi' ? 'flex' : 'none';
+            document.getElementById('aiControls').style.display = (t === 'swrsi') ? 'none' : 'flex';
+            document.getElementById('swrsiControls').style.display = (t === 'swrsi') ? 'flex' : 'none';
+            document.getElementById('swrsiStatsBar').style.display = (t === 'swrsi') ? 'flex' : 'none';
             if (t === 'swrsi') { loadSWRSIDates(); loadSWRSI(); }
             else { const map = { ai_signals: 'daily_ai_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' }; loadDates(map[t]); loadCurrentTab(); }
         }
@@ -459,15 +437,6 @@ async def dashboard():
             if (s.includes('STRONG SELL')) return 'signal-SS';
             if (s.includes('SELL')) return 'signal-S';
             return '';
-        }
-
-        function getStrengthBadge(s) {
-            if (!s) return '';
-            const lower = (s || '').toLowerCase();
-            if (lower === 'strong') return '<span class="swrsi-badge swrsi-strong">Strong</span>';
-            if (lower === 'moderate') return '<span class="swrsi-badge swrsi-moderate">Moderate</span>';
-            if (lower === 'weak') return '<span class="swrsi-badge swrsi-weak">Weak</span>';
-            return s;
         }
 
         function startEdit(symbol, date, entry, sl, tp, i) { editingRow = { symbol, date, rowIndex: i }; renderTable(); }
@@ -499,18 +468,17 @@ async def dashboard():
             currentData.forEach((r, i) => {
                 const ltp = dseLtpData[r.symbol] || null;
                 const ltpDisplay = ltp ? `<span style="color:#00ff88;font-weight:bold;">${ltp.toFixed(2)}</span>` : '-';
-                const scoreClass = (r.composite_score || 0) >= 70 ? 'score-strong' : (r.composite_score || 0) >= 45 ? 'score-moderate' : 'score-weak';
                 html += `<tr>
                     <td>${i+1}</td><td><strong>${r.symbol || ''}</strong></td><td>${r.sector || ''}</td>
                     <td>${ltpDisplay}</td>
-                    <td class="${scoreClass}"><strong>${(r.composite_score || 0).toFixed(0)}</strong></td>
-                    <td>${r.weekly_divergence || ''}</td><td>${getStrengthBadge(r.weekly_strength_label)}</td>
+                    <td>${(r.composite_score || 0).toFixed(0)}</td>
+                    <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
                     <td>${r.weekly_strength_score || 0}</td>
                     <td>${(r.weekly_prev_low || 0).toFixed(2)}</td><td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
                     <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td><td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
                     <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
                     <td>${r.weekly_prev_date || ''}</td><td>${r.weekly_curr_date || ''}</td>
-                    <td>${r.daily_divergence_type || ''}</td><td>${getStrengthBadge(r.daily_divergence_strength)}</td>
+                    <td>${r.daily_divergence_type || ''}</td><td>${r.daily_divergence_strength || ''}</td>
                     <td>${(r.daily_last_rsi || 0).toFixed(2)}</td><td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
                     <td>${r.signal_date || r.analysis_date || ''}</td>
                 </tr>`;
@@ -522,6 +490,8 @@ async def dashboard():
         function renderTable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
+            
+            // ✅ 37 Columns (removed saved_at & analysis_date from display)
             let html = `<table><thead><tr>
                 <th>#</th><th>Symbol</th><th>Date</th><th>Price</th><th>LTP</th><th>Sector</th>
                 <th>Signal</th><th>Score</th><th>LLM</th><th>LLM%</th><th>LLM Str</th>
@@ -530,9 +500,10 @@ async def dashboard():
                 <th>Agentic</th><th>Ag Bias</th><th>Ag Av</th>
                 <th>E Acc</th><th>E Tot</th><th>E Wave</th><th>Sub-Wave</th>
                 <th>Cur Wave</th><th>W Conf</th><th>Bull?</th><th>W Pos</th>
-                <th>Models</th><th>Entry</th><th>SL</th><th>TP</th><th>R:R</th>
+                <th>Entry</th><th>SL</th><th>TP</th><th>R:R</th>
                 <th>Act</th>
             </tr></thead><tbody>`;
+            
             currentData.forEach((r, i) => {
                 const isEditing = editingRow && editingRow.symbol === r.symbol && editingRow.date === r.analysis_date;
                 const isEdited = r.edited === true;
@@ -544,6 +515,7 @@ async def dashboard():
                 const actionCell = isEditing 
                     ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>`
                     : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}')">🗑️</button>`;
+                
                 html += `<tr>
                     <td>${i+1}</td><td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}</strong></td>
                     <td>${r.analysis_date||''}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${ltpDisplay}</td>
@@ -563,7 +535,6 @@ async def dashboard():
                     <td style="font-size:0.65em;max-width:100px;overflow:hidden;">${(r.elliott_sub_waves||'').substring(0,20)}</td>
                     <td>${r.elliott_current_wave||''}</td><td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
                     <td>${r.elliott_is_bullish ? '✅' : '❌'}</td><td>${r.elliott_wave_position||''}</td>
-                    <td>${r.model_availability||''}</td>
                     <td>${entryCell}</td><td>${slCell}</td><td>${tpCell}</td>
                     <td>${r.risk_reward_ratio||0}</td><td>${actionCell}</td>
                 </tr>`;
@@ -576,7 +547,7 @@ async def dashboard():
         function renderGenericTable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
-            const keys = Object.keys(currentData[0]).filter(k => k !== '_id');
+            const keys = Object.keys(currentData[0]).filter(k => k !== '_id' && k !== 'saved_at' && k !== 'analysis_date');
             let html = `<table><thead><tr>${keys.map(k => `<th>${k}</th>`).join('')}<th>🗑️</th></tr></thead><tbody>`;
             currentData.forEach(r => {
                 html += '<tr>' + keys.map(k => `<td>${r[k]??''}</td>`).join('');
