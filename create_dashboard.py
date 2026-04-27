@@ -1,6 +1,7 @@
 """
 scripts/create_dashboard.py
-✅ AI Signals (39 cols) + LTP + Alert + All Tabs + Edit Entry/SL/TP + SWRSI Tab (with Date Filter)
+✅ AI Signals (39 cols) + LTP + Alert + All Tabs + Edit Entry/SL/TP + SWRSI Tab
+✅ DSE Market: Sun-Thu 10AM-2:20PM, LTP every 60 seconds
 """
 
 import os
@@ -16,7 +17,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="9.2.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="10.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -28,6 +29,21 @@ def get_mongo_collection(collection_name=None):
     except: return None
 
 # ================================
+# DSE Market Status (Sun-Thu, 10AM-2:20PM)
+# ================================
+def is_dse_market_open():
+    """DSE Market: রবি-বৃহস্পতি, সকাল ১০টা - দুপুর ২:২০টা"""
+    now = datetime.now()
+    hour, minute, weekday = now.hour, now.minute, now.weekday()
+    
+    # Python: Monday=0, Sunday=6
+    # DSE Open: Sunday(6), Monday(0), Tuesday(1), Wednesday(2), Thursday(3)
+    return (weekday in [6, 0, 1, 2, 3] and 
+            ((hour == 10 and minute >= 0) or 
+             (10 < hour < 14) or 
+             (hour == 14 and minute <= 20)))
+
+# ================================
 # API Routes
 # ================================
 @app.get("/api/health")
@@ -35,30 +51,63 @@ async def health():
     col = get_mongo_collection()
     swrsi_col = get_mongo_collection("swrsi_signals") if MONGODB_URI else None
     swrsi_count = swrsi_col.count_documents({}) if swrsi_col else 0
+    dse_open = is_dse_market_open()
     return {
         "status": "ok", 
         "mongodb": "connected" if col else "not configured",
-        "swrsi_signals": swrsi_count
+        "swrsi_signals": swrsi_count,
+        "dse_market": "OPEN" if dse_open else "CLOSED"
     }
 
 @app.get("/api/market-status")
 async def market_status():
     now = datetime.now()
     hour, minute, weekday = now.hour, now.minute, now.weekday()
-    is_open = (weekday <= 4 and ((hour == 10) or (10 < hour < 14) or (hour == 14 and minute <= 20)))
+    
+    is_open = is_dse_market_open()
+    
     close_time = now.replace(hour=14, minute=20, second=0, microsecond=0)
     time_to_close = (close_time - now).total_seconds()
     alert_10min = is_open and (0 < time_to_close <= 600)
-    return {"is_open": is_open, "alert_10min": alert_10min, "alert_message": "⚠️ MARKET CLOSING IN 10 MINUTES!" if alert_10min else "", "timestamp": now.isoformat()}
+    
+    # Next open day calculation
+    if not is_open:
+        if weekday == 3:  # Thursday
+            next_open = "Sunday 10:00 AM"
+        elif weekday in [4, 5]:  # Friday, Saturday
+            next_open = "Sunday 10:00 AM" if weekday in [4, 5] else "Tomorrow 10:00 AM"
+        else:
+            next_open = "Tomorrow 10:00 AM"
+    else:
+        next_open = None
+    
+    return {
+        "is_open": is_open,
+        "alert_10min": alert_10min,
+        "alert_message": "⚠️ DSE CLOSING IN 10 MINUTES! Review your positions." if alert_10min else "",
+        "next_open": next_open,
+        "timestamp": now.isoformat()
+    }
 
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
     now = datetime.now()
-    hour, minute, weekday = now.hour, now.minute, now.weekday()
-    is_open = (weekday <= 4 and ((hour == 10) or (10 < hour < 14) or (hour == 14 and minute <= 20)))
-    if not is_open: return {"status": "closed", "message": "Market Closed", "timestamp": now.isoformat()}
+    
+    if not is_dse_market_open():
+        weekday = now.weekday()
+        if weekday in [3, 4, 5]:
+            next_open = "Sunday 10:00 AM"
+        else:
+            next_open = "Tomorrow 10:00 AM"
+        return {
+            "status": "closed", 
+            "message": f"DSE Closed. Opens {next_open}",
+            "timestamp": now.isoformat()
+        }
+    
     try:
-        response = requests.get("https://www.dsebd.org/dseX_share.php", headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        response = requests.get("https://www.dsebd.org/dseX_share.php", 
+                               headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
         soup = BeautifulSoup(response.content, 'html.parser')
         table = soup.find('table')
         ltp_data = {}
@@ -70,8 +119,15 @@ async def get_dse_ltp():
                     ltp = cols[1].text.strip().replace(',', '')
                     try: ltp_data[symbol] = float(ltp)
                     except: continue
-        return {"status": "live", "market": "OPEN", "total_symbols": len(ltp_data), "ltp_data": ltp_data, "timestamp": now.isoformat()}
-    except Exception as e: return {"status": "error", "message": str(e)}
+        return {
+            "status": "live", 
+            "market": "DSE OPEN", 
+            "total_symbols": len(ltp_data), 
+            "ltp_data": ltp_data, 
+            "timestamp": now.isoformat()
+        }
+    except Exception as e: 
+        return {"status": "error", "message": str(e)}
 
 @app.get("/api/dates")
 async def get_dates(collection: str = Query("daily_ai_signals")):
@@ -82,7 +138,6 @@ async def get_dates(collection: str = Query("daily_ai_signals")):
 
 @app.get("/api/swrsi/dates")
 async def get_swrsi_dates():
-    """SWRSI collection থেকে available dates"""
     col = get_mongo_collection("swrsi_signals")
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     dates = col.distinct('analysis_date')
@@ -105,30 +160,18 @@ async def get_signals(date: str = Query(None), signal: str = Query(None), symbol
 
 @app.get("/api/swrsi")
 async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
-    """SWRSI Signals from MongoDB with date filter"""
     col = get_mongo_collection("swrsi_signals")
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-    
     query = {}
-    if date: 
-        query['analysis_date'] = date
+    if date: query['analysis_date'] = date
     else:
-        # Latest date
         latest = list(col.find().sort('analysis_date', -1).limit(1))
-        if latest: 
-            query['analysis_date'] = latest[0]['analysis_date']
-    
-    if symbol: 
-        query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    
+        if latest: query['analysis_date'] = latest[0]['analysis_date']
+    if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
     data = list(col.find(query, {'_id': 0}).sort('composite_score', -1))
-    
-    # Available dates for dropdown
     all_dates = sorted(col.distinct('analysis_date'), reverse=True)
-    
     return {
-        "signals": data,
-        "total_signals": len(data),
+        "signals": data, "total_signals": len(data),
         "available_dates": all_dates,
         "current_date": date or (all_dates[0] if all_dates else None),
         "last_run": datetime.now().isoformat()
@@ -177,7 +220,7 @@ async def update_trade(symbol: str = Query(...), date: str = Query(...), entry_p
     return {"updated": result.modified_count, "symbol": symbol, "date": date}
 
 # ================================
-# HTML Dashboard (39 Columns + SWRSI Tab with Date Filter)
+# HTML Dashboard
 # ================================
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -234,9 +277,9 @@ async def dashboard():
 <body>
     <div class="header">
         <h1>🤖 AI Trading Signals Dashboard</h1>
-        <p id="marketStatus">Checking...</p>
+        <p id="marketStatus">Checking DSE status...</p>
     </div>
-    <div id="alertBox" class="alert-box">⚠️ MARKET CLOSING IN 10 MINUTES!</div>
+    <div id="alertBox" class="alert-box">⚠️ DSE CLOSING IN 10 MINUTES!</div>
     <div class="tabs">
         <div class="tab active" onclick="switchTab('ai_signals')">🤖 AI Signals</div>
         <div class="tab swrsi-tab" onclick="switchTab('swrsi')">🔍 SWRSI</div>
@@ -259,8 +302,8 @@ async def dashboard():
         <label>🔍 Symbol:</label>
         <input type="text" id="swrsiSymbolSearch" onkeyup="loadSWRSI()" style="width:120px;" placeholder="Filter symbol...">
         <div class="date-nav">
-            <button onclick="navigateSWRSIDate(-1)" title="Previous date">◀</button>
-            <button onclick="navigateSWRSIDate(1)" title="Next date">▶</button>
+            <button onclick="navigateSWRSIDate(-1)">◀ Prev</button>
+            <button onclick="navigateSWRSIDate(1)">Next ▶</button>
         </div>
         <button onclick="loadSWRSI()">🔄 Refresh</button>
         <span id="swrsiRecordCount" style="color:#888;"></span>
@@ -280,12 +323,21 @@ async def dashboard():
         checkMarketStatus();
         loadDseLtp();
         setInterval(checkMarketStatus, 60000);
-        setInterval(loadDseLtp, 60000);
+        // ✅ DSE Market Open থাকলে প্রতি ৬০ সেকেন্ডে LTP রিফ্রেশ
+        setInterval(async () => {
+            const res = await fetch('/api/market-status');
+            const status = await res.json();
+            if (status.is_open) loadDseLtp();
+        }, 60000);
 
         async function checkMarketStatus() {
             const res = await fetch('/api/market-status');
             const s = await res.json();
-            document.getElementById('marketStatus').innerHTML = s.is_open ? '🟢 MARKET OPEN' : '🔴 MARKET CLOSED';
+            if (s.is_open) {
+                document.getElementById('marketStatus').innerHTML = '🟢 DSE MARKET OPEN (Sun-Thu, 10AM-2:20PM)';
+            } else {
+                document.getElementById('marketStatus').innerHTML = `🔴 DSE CLOSED | Opens ${s.next_open || 'next session'}`;
+            }
             document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
         }
 
@@ -314,22 +366,16 @@ async def dashboard():
             const s = document.getElementById('swrsiDateSelect');
             s.innerHTML = '<option value="">Latest</option>';
             swrsiDates.forEach(v => {
-                const o = document.createElement('option');
-                o.value = v;
-                o.textContent = v;
-                s.appendChild(o);
+                const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o);
             });
         }
 
         function navigateSWRSIDate(direction) {
             const select = document.getElementById('swrsiDateSelect');
             const currentVal = select.value;
-            
             if (!swrsiDates.length) return;
-            
             let currentIndex = currentVal ? swrsiDates.indexOf(currentVal) : 0;
             if (currentIndex === -1) currentIndex = 0;
-            
             const newIndex = currentIndex + direction;
             if (newIndex >= 0 && newIndex < swrsiDates.length) {
                 select.value = swrsiDates[newIndex];
@@ -338,10 +384,7 @@ async def dashboard():
         }
 
         async function loadCurrentTab() {
-            if (currentTab === 'swrsi') {
-                loadSWRSI();
-                return;
-            }
+            if (currentTab === 'swrsi') { loadSWRSI(); return; }
             const date = document.getElementById('dateSelect').value;
             const symbol = document.getElementById('symbolSearch').value;
             if (currentTab === 'ai_signals') {
@@ -364,40 +407,26 @@ async def dashboard():
         async function loadSWRSI() {
             const date = document.getElementById('swrsiDateSelect').value;
             const symbol = document.getElementById('swrsiSymbolSearch').value;
-            
             let url = '/api/swrsi?';
             if (date) url += `date=${date}&`;
             if (symbol) url += `symbol=${symbol}&`;
-            
             const r = await fetch(url);
             const j = await r.json();
             currentData = j.signals || [];
-            
-            // Update dates dropdown
             if (j.available_dates && j.available_dates.length > 0) {
                 swrsiDates = j.available_dates;
                 const s = document.getElementById('swrsiDateSelect');
                 if (s.options.length <= 1) {
                     s.innerHTML = '<option value="">Latest</option>';
-                    swrsiDates.forEach(v => {
-                        const o = document.createElement('option');
-                        o.value = v;
-                        o.textContent = v;
-                        s.appendChild(o);
-                    });
+                    swrsiDates.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); });
                 }
-                if (j.current_date) {
-                    s.value = j.current_date;
-                }
+                if (j.current_date) s.value = j.current_date;
             }
-            
-            // Stats
             const total = j.total_signals || 0;
             const strong = currentData.filter(s => (s.weekly_strength_label || '') === 'Strong').length;
             const moderate = currentData.filter(s => (s.weekly_strength_label || '') === 'Moderate').length;
             const weak = currentData.filter(s => (s.weekly_strength_label || '') === 'Weak').length;
             const highScore = currentData.filter(s => (s.composite_score || 0) >= 70).length;
-            
             document.getElementById('swrsiStatsBar').innerHTML = `
                 <div class="stat-card"><div class="value">${total}</div><div class="label">Total Signals</div></div>
                 <div class="stat-card"><div class="value">${highScore}</div><div class="label">High Score (≥70)</div></div>
@@ -406,7 +435,6 @@ async def dashboard():
                 <div class="stat-card"><div class="value">${weak}</div><div class="label">Weak Weekly</div></div>
             `;
             document.getElementById('swrsiRecordCount').textContent = `(${total} signals${j.current_date ? ' | ' + j.current_date : ''})`;
-            
             renderSWRSITable();
         }
 
@@ -416,20 +444,11 @@ async def dashboard():
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
             document.getElementById('swrsiSymbolSearch').value = '';
-            
-            // Toggle controls
             document.getElementById('aiControls').style.display = t === 'swrsi' ? 'none' : 'flex';
             document.getElementById('swrsiControls').style.display = t === 'swrsi' ? 'flex' : 'none';
             document.getElementById('swrsiStatsBar').style.display = t === 'swrsi' ? 'flex' : 'none';
-            
-            if (t === 'swrsi') {
-                loadSWRSIDates();
-                loadSWRSI();
-            } else {
-                const map = { ai_signals: 'daily_ai_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
-                loadDates(map[t]);
-                loadCurrentTab();
-            }
+            if (t === 'swrsi') { loadSWRSIDates(); loadSWRSI(); }
+            else { const map = { ai_signals: 'daily_ai_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' }; loadDates(map[t]); loadCurrentTab(); }
         }
 
         function getSignalClass(s) {
@@ -442,18 +461,9 @@ async def dashboard():
             return '';
         }
 
-        function getStrengthClass(s) {
-            if (!s) return '';
-            const lower = s.toLowerCase();
-            if (lower === 'strong') return 'score-strong';
-            if (lower === 'moderate') return 'score-moderate';
-            if (lower === 'weak') return 'score-weak';
-            return '';
-        }
-
         function getStrengthBadge(s) {
             if (!s) return '';
-            const lower = s.toLowerCase();
+            const lower = (s || '').toLowerCase();
             if (lower === 'strong') return '<span class="swrsi-badge swrsi-strong">Strong</span>';
             if (lower === 'moderate') return '<span class="swrsi-badge swrsi-moderate">Moderate</span>';
             if (lower === 'weak') return '<span class="swrsi-badge swrsi-weak">Weak</span>';
@@ -475,11 +485,7 @@ async def dashboard():
 
         function renderSWRSITable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { 
-                div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found for this date</p>'; 
-                return; 
-            }
-            
+            if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
             let html = `<table><thead><tr>
                 <th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Composite Score</th>
                 <th>Weekly Div</th><th>Weekly Label</th><th>Weekly Score</th>
@@ -490,46 +496,32 @@ async def dashboard():
                 <th>Daily Last RSI</th><th>Daily Prev RSI</th>
                 <th>Signal Date</th>
             </tr></thead><tbody>`;
-            
             currentData.forEach((r, i) => {
                 const ltp = dseLtpData[r.symbol] || null;
                 const ltpDisplay = ltp ? `<span style="color:#00ff88;font-weight:bold;">${ltp.toFixed(2)}</span>` : '-';
                 const scoreClass = (r.composite_score || 0) >= 70 ? 'score-strong' : (r.composite_score || 0) >= 45 ? 'score-moderate' : 'score-weak';
-                
                 html += `<tr>
-                    <td>${i+1}</td>
-                    <td><strong>${r.symbol || ''}</strong></td>
-                    <td>${r.sector || ''}</td>
+                    <td>${i+1}</td><td><strong>${r.symbol || ''}</strong></td><td>${r.sector || ''}</td>
                     <td>${ltpDisplay}</td>
                     <td class="${scoreClass}"><strong>${(r.composite_score || 0).toFixed(0)}</strong></td>
-                    <td>${r.weekly_divergence || ''}</td>
-                    <td>${getStrengthBadge(r.weekly_strength_label)}</td>
+                    <td>${r.weekly_divergence || ''}</td><td>${getStrengthBadge(r.weekly_strength_label)}</td>
                     <td>${r.weekly_strength_score || 0}</td>
-                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td>
-                    <td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
-                    <td>${r.weekly_prev_date || ''}</td>
-                    <td>${r.weekly_curr_date || ''}</td>
-                    <td>${r.daily_divergence_type || ''}</td>
-                    <td>${getStrengthBadge(r.daily_divergence_strength)}</td>
-                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td><td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td><td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
+                    <td>${r.weekly_prev_date || ''}</td><td>${r.weekly_curr_date || ''}</td>
+                    <td>${r.daily_divergence_type || ''}</td><td>${getStrengthBadge(r.daily_divergence_strength)}</td>
+                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td><td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
                     <td>${r.signal_date || r.analysis_date || ''}</td>
                 </tr>`;
             });
             html += '</tbody></table>';
             div.innerHTML = html;
-            document.getElementById('recordCount').textContent = `(${currentData.length} signals)`;
         }
 
         function renderTable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
-            
-            // 39 Columns Header
             let html = `<table><thead><tr>
                 <th>#</th><th>Symbol</th><th>Date</th><th>Price</th><th>LTP</th><th>Sector</th>
                 <th>Signal</th><th>Score</th><th>LLM</th><th>LLM%</th><th>LLM Str</th>
@@ -541,63 +533,39 @@ async def dashboard():
                 <th>Models</th><th>Entry</th><th>SL</th><th>TP</th><th>R:R</th>
                 <th>Act</th>
             </tr></thead><tbody>`;
-            
             currentData.forEach((r, i) => {
                 const isEditing = editingRow && editingRow.symbol === r.symbol && editingRow.date === r.analysis_date;
                 const isEdited = r.edited === true;
                 const ltp = dseLtpData[r.symbol] || null;
                 const ltpDisplay = ltp ? `<span style="color:#00ff88;">${ltp.toFixed(2)}</span>` : '-';
-                
-                // Entry/SL/TP cells
                 const entryCell = isEditing ? `<input class="editable-input" id="edit-entry-${r.symbol}" value="${(r.entry_price||0).toFixed(2)}">` : (r.entry_price||0).toFixed(2);
                 const slCell = isEditing ? `<input class="editable-input" id="edit-sl-${r.symbol}" value="${(r.stop_loss||0).toFixed(2)}">` : (r.stop_loss||0).toFixed(2);
                 const tpCell = isEditing ? `<input class="editable-input" id="edit-tp-${r.symbol}" value="${(r.target_price||0).toFixed(2)}">` : (r.target_price||0).toFixed(2);
-                
-                // Action buttons
                 const actionCell = isEditing 
                     ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>`
                     : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}')">🗑️</button>`;
-                
                 html += `<tr>
-                    <td>${i+1}</td>
-                    <td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}</strong></td>
-                    <td>${r.analysis_date||''}</td>
-                    <td>${(r.current_price||0).toFixed(2)}</td>
-                    <td>${ltpDisplay}</td>
-                    <td>${r.sector||''}</td>
-                    <td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
+                    <td>${i+1}</td><td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}</strong></td>
+                    <td>${r.analysis_date||''}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${ltpDisplay}</td>
+                    <td>${r.sector||''}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
                     <td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td>
-                    <td>${r.llm_signal||''}</td>
-                    <td>${(r.llm_confidence||0).toFixed(0)}%</td>
-                    <td>${r.llm_strength||''}</td>
-                    <td>${r.llm_bias||''}</td>
-                    <td>${r.llm_available ? '✅' : '❌'}</td>
-                    <td>${r.xgb_signal||''}</td>
-                    <td>${(r.xgb_confidence||0).toFixed(0)}%</td>
-                    <td>${(r.xgb_prob_up||0).toFixed(3)}</td>
-                    <td>${(r.xgb_auc||0).toFixed(3)}</td>
+                    <td>${r.llm_signal||''}</td><td>${(r.llm_confidence||0).toFixed(0)}%</td>
+                    <td>${r.llm_strength||''}</td><td>${r.llm_bias||''}</td><td>${r.llm_available ? '✅' : '❌'}</td>
+                    <td>${r.xgb_signal||''}</td><td>${(r.xgb_confidence||0).toFixed(0)}%</td>
+                    <td>${(r.xgb_prob_up||0).toFixed(3)}</td><td>${(r.xgb_auc||0).toFixed(3)}</td>
                     <td>${r.xgb_available ? '✅' : '❌'}</td>
-                    <td>${r.ppo_signal||''}</td>
-                    <td>${(r.ppo_confidence||0).toFixed(0)}%</td>
-                    <td>${r.ppo_available ? '✅' : '❌'}</td>
-                    <td>${r.ppo_weight||0}</td>
-                    <td>${(r.agentic_score||0).toFixed(1)}</td>
-                    <td>${r.agentic_bias||''}</td>
+                    <td>${r.ppo_signal||''}</td><td>${(r.ppo_confidence||0).toFixed(0)}%</td>
+                    <td>${r.ppo_available ? '✅' : '❌'}</td><td>${r.ppo_weight||0}</td>
+                    <td>${(r.agentic_score||0).toFixed(1)}</td><td>${r.agentic_bias||''}</td>
                     <td>${r.agentic_available ? '✅' : '❌'}</td>
-                    <td>${(r.elliott_accuracy||0).toFixed(1)}%</td>
-                    <td>${r.elliott_total_predictions||0}</td>
+                    <td>${(r.elliott_accuracy||0).toFixed(1)}%</td><td>${r.elliott_total_predictions||0}</td>
                     <td style="font-size:0.65em;">${(r.elliott_wave_count||'').substring(0,15)}</td>
                     <td style="font-size:0.65em;max-width:100px;overflow:hidden;">${(r.elliott_sub_waves||'').substring(0,20)}</td>
-                    <td>${r.elliott_current_wave||''}</td>
-                    <td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
-                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td>
-                    <td>${r.elliott_wave_position||''}</td>
+                    <td>${r.elliott_current_wave||''}</td><td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
+                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td><td>${r.elliott_wave_position||''}</td>
                     <td>${r.model_availability||''}</td>
-                    <td>${entryCell}</td>
-                    <td>${slCell}</td>
-                    <td>${tpCell}</td>
-                    <td>${r.risk_reward_ratio||0}</td>
-                    <td>${actionCell}</td>
+                    <td>${entryCell}</td><td>${slCell}</td><td>${tpCell}</td>
+                    <td>${r.risk_reward_ratio||0}</td><td>${actionCell}</td>
                 </tr>`;
             });
             html += '</tbody></table>';
