@@ -1,10 +1,10 @@
 """
 create_dashboard.py
-✅ All Tabs with LTP + No Duplicate Date
+✅ All Tabs with LTP + No Duplicate Date - FIXED
 ✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
 ✅ AI Signals (37 cols) + SWRSI + S/R + MACD + EMA 200 + Daily Buy
-✅ Historical dates for ALL tabs - FIXED
-✅ LTP Alert system
+✅ Historical dates for ALL tabs - FIXED date matching
+✅ LTP Alert Modal with symbol selector + condition
 ✅ Delete All by Date + Edit buttons
 ✅ UptimeRobot HEAD endpoint
 """
@@ -22,7 +22,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="14.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="15.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -120,35 +120,50 @@ async def get_dse_ltp():
 
 @app.get("/api/dates")
 async def get_dates(collection: str = Query("daily_ai_signals")):
-    """Get all unique dates from a collection - handles both 'analysis_date' and 'date' fields"""
+    """Get all unique dates from a collection"""
     col = get_mongo_collection(collection)
     if col is None: 
         return JSONResponse({"error": f"MongoDB not configured for {collection}"}, status_code=500)
     
     try:
-        # Get all unique dates from both possible date fields
         dates_set = set()
         
-        # Check for analysis_date field
-        analysis_dates = col.distinct('analysis_date')
-        dates_set.update([d for d in analysis_dates if d])
+        # Check all possible date fields
+        for field in ['analysis_date', 'date', 'latest_date', 'signal_date']:
+            try:
+                field_dates = col.distinct(field)
+                dates_set.update([d for d in field_dates if d])
+            except:
+                pass
         
-        # Check for date field
-        date_field_dates = col.distinct('date')
-        dates_set.update([d for d in date_field_dates if d])
-        
-        # Also check for any other date-like fields
-        try:
-            latest_date_dates = col.distinct('latest_date')
-            dates_set.update([d for d in latest_date_dates if d])
-        except:
-            pass
-            
         all_dates = sorted(list(dates_set), reverse=True)
-        print(f"Found {len(all_dates)} dates in {collection}: {all_dates[:5]}...")  # Debug log
+        print(f"📅 {collection}: Found {len(all_dates)} dates")  # Debug log
         return all_dates
     except Exception as e:
-        print(f"Error getting dates for {collection}: {e}")
+        print(f"❌ Error getting dates for {collection}: {e}")
+        return []
+
+@app.get("/api/collection-symbols")
+async def get_collection_symbols(collection: str = Query(...), date: str = Query(None)):
+    """Get unique symbols from a collection, optionally filtered by date"""
+    col = get_mongo_collection(collection)
+    if col is None:
+        return JSONResponse({"error": f"Collection {collection} not found"}, status_code=500)
+    
+    query = {}
+    if date:
+        query['$or'] = [
+            {'analysis_date': date},
+            {'date': date},
+            {'latest_date': date}
+        ]
+    
+    try:
+        symbols = col.distinct('symbol', query)
+        symbols = [s for s in symbols if s]  # Remove empty/null
+        return sorted(symbols)
+    except Exception as e:
+        print(f"Error getting symbols: {e}")
         return []
 
 @app.get("/api/swrsi/dates")
@@ -167,7 +182,6 @@ async def get_signals(date: str = Query(None), signal: str = Query(None), symbol
     if date: 
         query['analysis_date'] = date
     else:
-        # Get latest date with data
         latest = list(collection.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
         if latest and latest[0].get('analysis_date'):
             query['analysis_date'] = latest[0]['analysis_date']
@@ -178,7 +192,6 @@ async def get_signals(date: str = Query(None), signal: str = Query(None), symbol
     
     cursor = collection.find(query, {'_id': 0}).sort('final_combined_score', -1).limit(limit)
     data = list(cursor)
-    print(f"Signals query: {query}, found {len(data)} records")  # Debug log
     return {"data": data}
 
 @app.get("/api/swrsi")
@@ -197,7 +210,6 @@ async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
     
     data = list(col.find(query, {'_id': 0}).sort('composite_score', -1))
-    print(f"SWRSI query: {query}, found {len(data)} records")  # Debug log
     return {"signals": data, "total_signals": len(data), "available_dates": sorted(col.distinct('analysis_date'), reverse=True)}
 
 @app.get("/api/stats")
@@ -216,29 +228,33 @@ async def get_stats(date: str = Query(None)):
 
 @app.get("/api/generic-data")
 async def get_generic_data(collection: str = Query(...), date: str = Query(None), symbol: str = Query(None), limit: int = Query(500)):
-    """Get data from generic collections with proper date handling"""
+    """Get data from generic collections with PROPER date handling"""
     col = get_mongo_collection(collection)
     if col is None: 
         return JSONResponse({"error": f"Collection {collection} not found"}, status_code=500)
     
     query = {}
+    
     if date:
-        # Try both date fields
-        query['$or'] = [
-            {'analysis_date': date},
-            {'date': date},
-            {'latest_date': date}
-        ]
+        # IMPORTANT: Build query with all possible date fields
+        date_conditions = []
+        for field in ['analysis_date', 'date', 'latest_date', 'signal_date']:
+            date_conditions.append({field: date})
+        query['$or'] = date_conditions
     
     if symbol: 
         query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
     
     try:
+        # Debug: print the query
+        print(f"🔍 Querying {collection} with: {query}")
+        
         data = list(col.find(query, {'_id': 0}).limit(limit))
-        print(f"Generic query on {collection}: date={date}, found {len(data)} records")  # Debug log
+        print(f"📊 Found {len(data)} records in {collection} for date={date}")
+        
         return {"data": data}
     except Exception as e:
-        print(f"Error in generic-data for {collection}: {e}")
+        print(f"❌ Error in generic-data for {collection}: {e}")
         return {"data": [], "error": str(e)}
 
 @app.delete("/api/delete-signal")
@@ -246,14 +262,13 @@ async def delete_signal(collection: str = Query("daily_ai_signals"), symbol: str
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     
-    # Try both date fields
-    result = col.delete_one({'symbol': symbol, 'analysis_date': date})
-    if result.deleted_count == 0:
-        result = col.delete_one({'symbol': symbol, 'date': date})
-    if result.deleted_count == 0:
-        result = col.delete_one({'symbol': symbol, 'latest_date': date})
+    # Try all possible date fields
+    for field in ['analysis_date', 'date', 'latest_date', 'signal_date']:
+        result = col.delete_one({'symbol': symbol, field: date})
+        if result.deleted_count > 0:
+            return {"deleted": result.deleted_count}
     
-    return {"deleted": result.deleted_count}
+    return {"deleted": 0}
 
 @app.delete("/api/delete-all-by-date")
 async def delete_all_by_date(collection: str = Query(...), date: str = Query(...)):
@@ -261,12 +276,12 @@ async def delete_all_by_date(collection: str = Query(...), date: str = Query(...
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     
+    total = 0
     # Delete from all possible date fields
-    result1 = col.delete_many({'analysis_date': date})
-    result2 = col.delete_many({'date': date})
-    result3 = col.delete_many({'latest_date': date})
+    for field in ['analysis_date', 'date', 'latest_date', 'signal_date']:
+        result = col.delete_many({field: date})
+        total += result.deleted_count
     
-    total = result1.deleted_count + result2.deleted_count + result3.deleted_count
     return {"deleted": total, "collection": collection, "date": date}
 
 @app.put("/api/update-trade")
@@ -290,7 +305,7 @@ async def dashboard():
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>🤖 AI Trading Signals Dashboard v14</title>
+    <title>🤖 AI Trading Signals Dashboard v15</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Segoe UI', sans-serif; background: #0a0a0f; color: #e0e0e0; padding: 20px; }
@@ -309,8 +324,9 @@ async def dashboard():
         button:hover { background: #1a4a7a; }
         .delete-all-btn { background: #ff4757; color: #fff; font-weight: bold; margin-left: auto; }
         .delete-all-btn:hover { background: #ff2840; }
-        .alert-ltp-input { width: 60px; text-align: center; background: #1a1a2e; color: #ffa500; border: 1px solid #ffa500; padding: 8px; border-radius: 6px; font-weight: bold; }
-        .clear-alert-btn { background: #666; padding: 8px 12px; font-size: 0.8em; }
+        .alert-config-btn { background: #ffa500; color: #000; font-weight: bold; }
+        .alert-config-btn:hover { background: #ffb732; }
+        .alert-active-indicator { display: inline-block; width: 8px; height: 8px; background: #ff4757; border-radius: 50%; margin-right: 5px; animation: pulse 1s infinite; }
         table { width: 100%; border-collapse: collapse; font-size: 0.65em; background: #111122; border-radius: 10px; overflow: hidden; border: 1px solid #222; }
         th { background: #1a1a2e; padding: 8px 4px; color: #00d4ff; white-space: nowrap; font-size: 0.9em; position: sticky; top: 0; z-index: 10; }
         td { padding: 4px; border-bottom: 1px solid #222; white-space: nowrap; }
@@ -325,17 +341,33 @@ async def dashboard():
         .signal-H { color: #ffd700; }
         .signal-S { color: #ff4757; }
         .signal-SS { color: #ff0000; font-weight: bold; }
-        .ltp-alert-row { animation: ltpBlink 0.8s infinite; }
-        @keyframes ltpBlink { 0%,100% { background: #ff475720; } 50% { background: #ff475740; } }
-        .ltp-above { color: #00ff88 !important; }
-        .ltp-below { color: #ff4757 !important; }
-        .debug-info { font-size: 0.7em; color: #666; margin-top: 10px; }
+        .ltp-alert-row { animation: ltpBlink 0.6s infinite; }
+        @keyframes ltpBlink { 0%,100% { background: #ff475730; } 50% { background: #ff475760; } }
+        .ltp-above { color: #00ff88 !important; font-weight: bold; }
+        .ltp-below { color: #ff4757 !important; font-weight: bold; }
+        /* Modal Styles */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; }
+        .modal.open { display: flex; }
+        .modal-content { background: #1a1a2e; padding: 25px; border-radius: 15px; max-width: 500px; width: 90%; border: 2px solid #ffa500; max-height: 80vh; overflow-y: auto; }
+        .modal-content h3 { color: #ffa500; margin-bottom: 20px; font-size: 1.2em; text-align: center; }
+        .modal-content label { display: block; margin: 12px 0 5px; color: #aaa; font-size: 0.9em; }
+        .modal-content select, .modal-content input { width: 100%; padding: 10px; margin-bottom: 10px; }
+        .modal-buttons { display: flex; gap: 10px; margin-top: 20px; }
+        .modal-buttons button { flex: 1; padding: 12px; }
+        .save-alert-btn { background: #00ff88; color: #000; font-weight: bold; }
+        .cancel-alert-btn { background: #666; }
+        .remove-alert-btn { background: #ff4757; color: #fff; padding: 5px 10px; font-size: 0.8em; width: auto; }
+        .current-alerts { margin-top: 15px; background: #0f3460; padding: 10px; border-radius: 8px; }
+        .current-alerts h4 { color: #ffa500; margin-bottom: 8px; font-size: 0.9em; }
+        .alert-item { display: flex; justify-content: space-between; align-items: center; background: #1a1a2e; padding: 8px; margin: 5px 0; border-radius: 5px; font-size: 0.8em; }
+        .alert-item span { color: #ffa500; }
+        .debug-info { font-size: 0.7em; color: #666; margin-top: 10px; padding: 8px; background: #111; border-radius: 5px; }
         @media (max-width: 768px) { .header h1 { font-size: 1.3em; } .controls { flex-direction: column; } }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🤖 AI Trading Signals Dashboard v14</h1>
+        <h1>🤖 AI Trading Signals Dashboard v15</h1>
         <p id="marketStatus" style="font-size:0.85em;margin-top:5px;">Checking DSE status...</p>
     </div>
     <div id="alertBox" class="alert-box">⚠️ DSE CLOSING IN 10 MINUTES!</div>
@@ -355,16 +387,40 @@ async def dashboard():
         <label>🔍 Symbol:</label>
         <input type="text" id="symbolSearch" onkeyup="loadCurrentTab()" style="width:100px;">
         <button onclick="loadCurrentTab()">🔄 Refresh</button>
-        <label style="margin-left:10px;">🔔 LTP Alert:</label>
-        <input type="number" id="ltpAlertPrice" class="alert-ltp-input" placeholder="Price" step="0.01" onchange="renderCurrentTab()">
-        <button class="clear-alert-btn" onclick="clearLtpAlert()">Clear</button>
+        <button class="alert-config-btn" onclick="openAlertModal()">🔔 Configure Alerts</button>
         <button class="delete-all-btn" onclick="deleteAllByDate()">🗑️ Delete All (Date)</button>
         <span id="recordCount" style="color:#888;margin-left:5px;font-size:0.8em;"></span>
     </div>
     
-    <div id="ltpAlertStatus" style="background:#0f3460;padding:6px 12px;border-radius:6px;margin-bottom:8px;display:none;color:#ffa500;font-size:0.8em;"></div>
+    <!-- Alert Modal -->
+    <div id="alertModal" class="modal">
+        <div class="modal-content">
+            <h3>🔔 Configure LTP Alerts</h3>
+            <label>📋 Select Symbol:</label>
+            <select id="alertSymbolSelect">
+                <option value="">-- Choose Symbol --</option>
+            </select>
+            <label>📊 Condition:</label>
+            <select id="alertCondition">
+                <option value="above">LTP উপরে গেলে Alert</option>
+                <option value="below">LTP নিচে গেলে Alert</option>
+            </select>
+            <label>💰 Threshold Price:</label>
+            <input type="number" id="alertThresholdPrice" placeholder="Enter price..." step="0.01">
+            <div class="modal-buttons">
+                <button class="save-alert-btn" onclick="addAlertRule()">➕ Add Alert</button>
+                <button class="cancel-alert-btn" onclick="closeAlertModal()">Cancel</button>
+            </div>
+            <div class="current-alerts" id="currentAlertsSection" style="display:none;">
+                <h4>📋 Active Alerts:</h4>
+                <div id="currentAlertsList"></div>
+            </div>
+        </div>
+    </div>
     
-    <div style="overflow-x:auto;max-height:70vh;" id="dynamicTable"></div>
+    <div id="alertStatusBar" style="background:#0f3460;padding:6px 12px;border-radius:6px;margin-bottom:8px;display:none;color:#ffa500;font-size:0.8em;"></div>
+    
+    <div style="overflow-x:auto;max-height:65vh;" id="dynamicTable"></div>
     
     <div class="debug-info" id="debugInfo"></div>
 
@@ -373,9 +429,8 @@ async def dashboard():
         let currentData = [];
         let dseLtpData = {};
         let editingRow = null;
-        let ltpAlertPrice = null;
+        let alertRules = []; // Array of {symbol, condition, threshold}
 
-        // Collection mapping
         const COLLECTION_MAP = { 
             ai_signals: 'daily_ai_signals', 
             swrsi: 'swrsi_signals', 
@@ -390,6 +445,7 @@ async def dashboard():
         loadCurrentTab();
         checkMarketStatus();
         loadDseLtp();
+        loadAlertRules();
         
         // Refresh intervals
         setInterval(checkMarketStatus, 60000);
@@ -398,8 +454,137 @@ async def dashboard():
             const status = await res.json();
             if (status.is_open) loadDseLtp();
         }, 60000);
-        setInterval(loadDseLtp, 300000); // Refresh LTP every 5 min
+        setInterval(loadDseLtp, 300000);
 
+        // ===== ALERT SYSTEM =====
+        function loadAlertRules() {
+            const saved = localStorage.getItem('ltpAlertRules_v15');
+            if (saved) {
+                try { alertRules = JSON.parse(saved); } catch(e) { alertRules = []; }
+            }
+            updateAlertStatusBar();
+        }
+
+        function saveAlertRules() {
+            localStorage.setItem('ltpAlertRules_v15', JSON.stringify(alertRules));
+            updateAlertStatusBar();
+            renderCurrentTab();
+        }
+
+        function updateAlertStatusBar() {
+            const bar = document.getElementById('alertStatusBar');
+            if (alertRules.length > 0) {
+                bar.style.display = 'block';
+                bar.innerHTML = `<span class="alert-active-indicator"></span> <strong>${alertRules.length} Alert(s) Active:</strong> ` + 
+                    alertRules.map(r => `${r.symbol} ${r.condition === 'above' ? '>' : '<'} ${r.threshold}`).join(' | ');
+            } else {
+                bar.style.display = 'none';
+            }
+        }
+
+        function openAlertModal() {
+            document.getElementById('alertModal').classList.add('open');
+            loadAlertSymbols();
+            renderCurrentAlerts();
+        }
+
+        function closeAlertModal() {
+            document.getElementById('alertModal').classList.remove('open');
+        }
+
+        async function loadAlertSymbols() {
+            const date = document.getElementById('dateSelect').value;
+            const collection = COLLECTION_MAP[currentTab];
+            const select = document.getElementById('alertSymbolSelect');
+            select.innerHTML = '<option value="">-- Choose Symbol --</option>';
+            
+            try {
+                let url = `/api/collection-symbols?collection=${encodeURIComponent(collection)}`;
+                if (date) url += `&date=${encodeURIComponent(date)}`;
+                const r = await fetch(url);
+                const symbols = await r.json();
+                
+                if (Array.isArray(symbols)) {
+                    symbols.forEach(sym => {
+                        const opt = document.createElement('option');
+                        opt.value = sym;
+                        opt.textContent = sym;
+                        select.appendChild(opt);
+                    });
+                }
+            } catch(e) {
+                console.error('Load symbols error:', e);
+            }
+        }
+
+        function renderCurrentAlerts() {
+            const section = document.getElementById('currentAlertsSection');
+            const list = document.getElementById('currentAlertsList');
+            
+            if (alertRules.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+            
+            section.style.display = 'block';
+            list.innerHTML = alertRules.map((rule, i) => `
+                <div class="alert-item">
+                    <span>🔔 ${rule.symbol} ${rule.condition === 'above' ? '↑ উপরে' : '↓ নিচে'} ${rule.threshold}</span>
+                    <button class="remove-alert-btn" onclick="removeAlertRule(${i})">✕ Remove</button>
+                </div>
+            `).join('');
+        }
+
+        function addAlertRule() {
+            const symbol = document.getElementById('alertSymbolSelect').value;
+            const condition = document.getElementById('alertCondition').value;
+            const threshold = parseFloat(document.getElementById('alertThresholdPrice').value);
+            
+            if (!symbol) { alert('Please select a symbol'); return; }
+            if (!threshold || isNaN(threshold)) { alert('Please enter a valid threshold price'); return; }
+            
+            // Remove existing rule for same symbol
+            alertRules = alertRules.filter(r => r.symbol !== symbol);
+            
+            // Add new rule
+            alertRules.push({ symbol, condition, threshold });
+            
+            // Save and update
+            saveAlertRules();
+            renderCurrentAlerts();
+            
+            // Clear inputs
+            document.getElementById('alertSymbolSelect').value = '';
+            document.getElementById('alertThresholdPrice').value = '';
+            
+            // Reload table to show alerts
+            renderCurrentTab();
+        }
+
+        function removeAlertRule(index) {
+            alertRules.splice(index, 1);
+            saveAlertRules();
+            renderCurrentAlerts();
+            renderCurrentTab();
+        }
+
+        function getLtpAlertStatus(symbol) {
+            if (!alertRules.length) return null;
+            
+            const ltp = dseLtpData[symbol] || null;
+            if (ltp === null) return null;
+            
+            // Check all rules for this symbol
+            for (const rule of alertRules) {
+                if (rule.symbol === symbol) {
+                    if (rule.condition === 'above' && ltp > rule.threshold) return 'above';
+                    if (rule.condition === 'below' && ltp < rule.threshold) return 'below';
+                }
+            }
+            return null;
+        }
+
+        // ===== DATE & DATA FUNCTIONS =====
         async function checkMarketStatus() {
             try {
                 const res = await fetch('/api/market-status');
@@ -408,9 +593,7 @@ async def dashboard():
                     ? `🟢 DSE MARKET OPEN | ${s.bangladesh_time || ''}`
                     : `🔴 DSE CLOSED | Opens ${s.next_open || 'next session'} | ${s.bangladesh_time || ''}`;
                 document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
-            } catch(e) {
-                console.error('Market status error:', e);
-            }
+            } catch(e) {}
         }
 
         async function loadDseLtp() {
@@ -421,30 +604,12 @@ async def dashboard():
                     dseLtpData = j.ltp_data || {};
                     renderCurrentTab();
                 }
-            } catch(e) {
-                console.error('LTP load error:', e);
-            }
-        }
-
-        function clearLtpAlert() {
-            document.getElementById('ltpAlertPrice').value = '';
-            ltpAlertPrice = null;
-            document.getElementById('ltpAlertStatus').style.display = 'none';
-            renderCurrentTab();
-        }
-
-        function getLtpAlertStatus(symbol) {
-            if (!ltpAlertPrice) return null;
-            const ltp = dseLtpData[symbol] || null;
-            if (ltp === null) return null;
-            if (ltp > ltpAlertPrice) return 'above';
-            if (ltp < ltpAlertPrice) return 'below';
-            return 'equal';
+            } catch(e) {}
         }
 
         async function loadDates(collection) {
             try {
-                const r = await fetch(`/api/dates?collection=${collection}`); 
+                const r = await fetch(`/api/dates?collection=${encodeURIComponent(collection)}`); 
                 const dates = await r.json(); 
                 const select = document.getElementById('dateSelect'); 
                 const currentValue = select.value;
@@ -461,16 +626,14 @@ async def dashboard():
                     });
                 }
                 
-                // Restore previous selection if exists
                 if (currentValue && Array.from(select.options).some(o => o.value === currentValue)) {
                     select.value = currentValue;
                 }
                 
                 document.getElementById('debugInfo').textContent = 
-                    `Collection: ${collection} | Dates found: ${dates.length} | Current tab: ${currentTab}`;
+                    `📅 Collection: ${collection} | Dates: ${dates.length} | Tab: ${currentTab}`;
             } catch(e) {
                 console.error('Load dates error:', e);
-                document.getElementById('debugInfo').textContent = `Error loading dates: ${e.message}`;
             }
         }
 
@@ -481,19 +644,6 @@ async def dashboard():
         async function loadCurrentTab() {
             const date = document.getElementById('dateSelect').value;
             const symbol = document.getElementById('symbolSearch').value;
-            const alertPriceVal = document.getElementById('ltpAlertPrice').value;
-            ltpAlertPrice = alertPriceVal ? parseFloat(alertPriceVal) : null;
-            
-            // Update alert status display
-            if (ltpAlertPrice) {
-                document.getElementById('ltpAlertStatus').style.display = 'block';
-                document.getElementById('ltpAlertStatus').innerHTML = 
-                    `🔔 LTP Alert: Monitoring at <strong>${ltpAlertPrice.toFixed(2)}</strong> | 
-                     <span style="color:#00ff88;">Above=Green↑</span> | 
-                     <span style="color:#ff4757;">Below=Red↓</span>`;
-            } else {
-                document.getElementById('ltpAlertStatus').style.display = 'none';
-            }
             
             try {
                 if (currentTab === 'ai_signals') {
@@ -520,12 +670,12 @@ async def dashboard():
                     currentData = j.data || [];
                 }
                 
-                document.getElementById('debugInfo').textContent += 
-                    ` | Data loaded: ${currentData.length} records`;
+                const dateInfo = date || 'Latest';
+                document.getElementById('debugInfo').textContent = 
+                    `📊 Tab: ${currentTab} | Date: ${dateInfo} | Records: ${currentData.length}`;
             } catch(e) {
                 console.error('Load data error:', e);
                 currentData = [];
-                document.getElementById('debugInfo').textContent += ` | Error: ${e.message}`;
             }
             
             renderCurrentTab();
@@ -541,14 +691,8 @@ async def dashboard():
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             event.target.classList.add('active');
             currentTab = tabName;
-            
-            // Reset filters
             document.getElementById('symbolSearch').value = '';
-            document.getElementById('ltpAlertPrice').value = '';
-            ltpAlertPrice = null;
-            document.getElementById('ltpAlertStatus').style.display = 'none';
             
-            // Load dates for new tab
             const collection = COLLECTION_MAP[tabName];
             loadDates(collection);
             loadCurrentTab();
@@ -627,7 +771,7 @@ async def dashboard():
             }
             
             const collection = COLLECTION_MAP[currentTab];
-            if (!confirm(`⚠️ DELETE ALL records for ${date}\\nCollection: ${collection}\\n\\nThis cannot be undone!\\n\\nClick OK to confirm.`)) return;
+            if (!confirm(`⚠️ DELETE ALL records for ${date}\\nCollection: ${collection}\\n\\nThis cannot be undone!`)) return;
             
             try {
                 const r = await fetch(`/api/delete-all-by-date?collection=${encodeURIComponent(collection)}&date=${encodeURIComponent(date)}`, { method: 'DELETE' });
@@ -693,36 +837,22 @@ async def dashboard():
                     <td>${r.sector||''}</td>
                     <td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
                     <td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td>
-                    <td>${r.llm_signal||''}</td>
-                    <td>${(r.llm_confidence||0).toFixed(0)}%</td>
-                    <td>${r.llm_strength||''}</td>
-                    <td>${r.llm_bias||''}</td>
-                    <td>${r.llm_available ? '✅' : '❌'}</td>
-                    <td>${r.xgb_signal||''}</td>
-                    <td>${(r.xgb_confidence||0).toFixed(0)}%</td>
-                    <td>${(r.xgb_prob_up||0).toFixed(3)}</td>
-                    <td>${(r.xgb_auc||0).toFixed(3)}</td>
+                    <td>${r.llm_signal||''}</td><td>${(r.llm_confidence||0).toFixed(0)}%</td>
+                    <td>${r.llm_strength||''}</td><td>${r.llm_bias||''}</td><td>${r.llm_available ? '✅' : '❌'}</td>
+                    <td>${r.xgb_signal||''}</td><td>${(r.xgb_confidence||0).toFixed(0)}%</td>
+                    <td>${(r.xgb_prob_up||0).toFixed(3)}</td><td>${(r.xgb_auc||0).toFixed(3)}</td>
                     <td>${r.xgb_available ? '✅' : '❌'}</td>
-                    <td>${r.ppo_signal||''}</td>
-                    <td>${(r.ppo_confidence||0).toFixed(0)}%</td>
-                    <td>${r.ppo_available ? '✅' : '❌'}</td>
-                    <td>${r.ppo_weight||0}</td>
-                    <td>${(r.agentic_score||0).toFixed(1)}</td>
-                    <td>${r.agentic_bias||''}</td>
+                    <td>${r.ppo_signal||''}</td><td>${(r.ppo_confidence||0).toFixed(0)}%</td>
+                    <td>${r.ppo_available ? '✅' : '❌'}</td><td>${r.ppo_weight||0}</td>
+                    <td>${(r.agentic_score||0).toFixed(1)}</td><td>${r.agentic_bias||''}</td>
                     <td>${r.agentic_available ? '✅' : '❌'}</td>
-                    <td>${(r.elliott_accuracy||0).toFixed(1)}%</td>
-                    <td>${r.elliott_total_predictions||0}</td>
+                    <td>${(r.elliott_accuracy||0).toFixed(1)}%</td><td>${r.elliott_total_predictions||0}</td>
                     <td style="font-size:0.6em;">${(r.elliott_wave_count||'').substring(0,12)}</td>
                     <td style="font-size:0.6em;max-width:80px;overflow:hidden;">${(r.elliott_sub_waves||'').substring(0,15)}</td>
-                    <td>${r.elliott_current_wave||''}</td>
-                    <td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
-                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td>
-                    <td>${r.elliott_wave_position||''}</td>
-                    <td>${entryCell}</td>
-                    <td>${slCell}</td>
-                    <td>${tpCell}</td>
-                    <td>${r.risk_reward_ratio||0}</td>
-                    <td>${actionCell}</td>
+                    <td>${r.elliott_current_wave||''}</td><td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
+                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td><td>${r.elliott_wave_position||''}</td>
+                    <td>${entryCell}</td><td>${slCell}</td><td>${tpCell}</td>
+                    <td>${r.risk_reward_ratio||0}</td><td>${actionCell}</td>
                 </tr>`;
             });
             html += '</tbody></table>';
@@ -757,24 +887,16 @@ async def dashboard():
                 html += `<tr class="${alertRowClass}">
                     <td>${i+1}</td>
                     <td><strong>${r.symbol || ''}${alertStatus ? ' 🔔' : ''}</strong></td>
-                    <td>${r.sector || ''}</td>
-                    <td>${ltpDisplay}</td>
+                    <td>${r.sector || ''}</td><td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
-                    <td>${r.weekly_divergence || ''}</td>
-                    <td>${r.weekly_strength_label || ''}</td>
+                    <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
                     <td>${r.weekly_strength_score || 0}</td>
-                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td>
-                    <td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
-                    <td>${r.weekly_prev_date || ''}</td>
-                    <td>${r.weekly_curr_date || ''}</td>
-                    <td>${r.daily_divergence_type || ''}</td>
-                    <td>${r.daily_divergence_strength || ''}</td>
-                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td><td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td><td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
+                    <td>${r.weekly_prev_date || ''}</td><td>${r.weekly_curr_date || ''}</td>
+                    <td>${r.daily_divergence_type || ''}</td><td>${r.daily_divergence_strength || ''}</td>
+                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td><td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
                     <td><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${r.analysis_date||r.date||''}','swrsi')">🗑️</button></td>
                 </tr>`;
             });
@@ -791,7 +913,7 @@ async def dashboard():
                 return; 
             }
             
-            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'saved_at', 'date'];
+            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'saved_at', 'date', 'signal_date'];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             
             let html = `<table><thead><tr>
@@ -804,7 +926,7 @@ async def dashboard():
                 const ltpDisplay = getLtpDisplay(r.symbol);
                 const alertStatus = getLtpAlertStatus(r.symbol);
                 const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
-                const recordDate = r.analysis_date || r.date || r.latest_date || '';
+                const recordDate = r.analysis_date || r.date || r.latest_date || r.signal_date || '';
                 
                 html += `<tr class="${alertRowClass}">
                     <td>${i+1}</td>
@@ -837,7 +959,6 @@ async def dashboard():
 if __name__ == "__main__":
     import uvicorn
     PORT = int(os.environ.get("PORT", 8000))
-    print(f"🚀 Dashboard v14: http://localhost:{PORT}")
+    print(f"🚀 Dashboard v15: http://localhost:{PORT}")
     print(f"💚 Health Check: http://localhost:{PORT}/head")
-    print(f"📊 Debug dates API: http://localhost:{PORT}/api/dates?collection=daily_buy_signals")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
