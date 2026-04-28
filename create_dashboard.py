@@ -8,8 +8,8 @@ create_dashboard.py
 import os
 import requests
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from datetime import datetime, timedelta, timezone
@@ -501,6 +501,46 @@ async def dashboard():
 </body>
 </html>
 """
+
+# ... (বাকি কোড একই থাকবে) ...
+
+@app.get("/api/health")
+async def health():
+    col = get_mongo_collection()
+    swrsi_col = get_mongo_collection("swrsi_signals") if MONGODB_URI else None
+    swrsi_count = swrsi_col.count_documents({}) if swrsi_col else 0
+    return {
+        "status": "ok", 
+        "mongodb": "connected" if col else "not configured",
+        "swrsi_signals": swrsi_count,
+        "dse_market": "OPEN" if is_dse_market_open() else "CLOSED",
+        "bangladesh_time": get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
+    }
+
+# ✅ UptimeRobot Monitoring Endpoints
+@app.api_route("/head", methods=["GET", "HEAD"])
+async def uptime_robot_head():
+    """
+    UptimeRobot monitoring endpoint
+    Returns minimal response for uptime checking
+    """
+    return Response(
+        content="OK",
+        status_code=200,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Health-Status": "healthy",
+            "X-Server-Time": get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
+        }
+    )
+
+@app.head("/ping")
+@app.get("/ping")
+async def ping():
+    """Simple ping-pong health check"""
+    return Response(status_code=200)
+
+# ... (বাকি সব API routes একই থাকবে) ...
 
 if __name__ == "__main__":
     import uvicorn
