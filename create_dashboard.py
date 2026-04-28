@@ -61,14 +61,20 @@ def build_date_query(date_value):
     ]
     return {'$or': conditions}
 
+# সম্পূর্ণ create_dashboard.py - শুধু পরিবর্তিত অংশগুলো দেখাচ্ছি
+
+# ================================
+# FIX: get_all_dates - আগের মতই
+# ================================
+
 def get_all_dates(collection_name):
-    """Get dates: analysis_date FIRST, then fallback to saved_at"""
+    """Get dates: analysis_date FIRST, then fallback"""
     col = get_mongo_collection(collection_name)
     if col is None: return []
     
     dates_set = set()
     
-    # PRIMARY: analysis_date (matches save_to_mongodb.py)
+    # PRIMARY: analysis_date
     try:
         for d in col.distinct('analysis_date'):
             if d:
@@ -94,9 +100,123 @@ def get_all_dates(collection_name):
         except: pass
     
     all_dates = sorted(list(dates_set), reverse=True)
-    print(f"📅 {collection_name}: {len(all_dates)} dates (analysis_date primary)")
-    if all_dates: print(f"   Sample: {all_dates[:5]}")
     return all_dates
+
+
+# ================================
+# FIX: generic-data - Latest = most recent date only
+# ================================
+@app.get("/api/generic-data")
+async def get_generic_data(collection: str = Query(...), date: str = Query(None),
+                           symbol: str = Query(None), limit: int = Query(500)):
+    col = get_mongo_collection(collection)
+    if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
+    
+    query = {}
+    
+    if date:
+        # Specific date selected
+        query = build_date_query(date)
+    else:
+        # LATEST: Find most recent analysis_date
+        latest_date = None
+        latest_doc = list(col.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
+        if latest_doc and latest_doc[0].get('analysis_date'):
+            latest_date = latest_doc[0]['analysis_date']
+        
+        if latest_date:
+            query = build_date_query(latest_date)
+            print(f"📊 {collection}: LATEST date = {latest_date}")
+        else:
+            # Fallback: try saved_at
+            latest_doc = list(col.find({'saved_at': {'$exists': True}}).sort('saved_at', -1).limit(1))
+            if latest_doc and latest_doc[0].get('saved_at'):
+                latest_date = latest_doc[0]['saved_at'][:10] if isinstance(latest_doc[0]['saved_at'], str) else ''
+                if latest_date:
+                    query = build_date_query(latest_date)
+    
+    if symbol: 
+        query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
+    
+    data = list(col.find(query, {'_id': 0}).limit(limit))
+    print(f"📊 {collection}: date={date or latest_date}, records={len(data)}")
+    return {"data": data}
+
+
+# ================================
+# FIX: signals endpoint - Latest = most recent date only
+# ================================
+@app.get("/api/signals")
+async def get_signals(date: str = Query(None), signal: str = Query(None), symbol: str = Query(None),
+                      min_score: float = Query(0), limit: int = Query(1000)):
+    col = get_mongo_collection()
+    if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
+    
+    query = {}
+    
+    if date:
+        query = build_date_query(date)
+    else:
+        # LATEST: most recent analysis_date
+        latest = list(col.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
+        if latest and latest[0].get('analysis_date'):
+            query = build_date_query(latest[0]['analysis_date'])
+            print(f"🔍 AI Signals: LATEST = {latest[0]['analysis_date']}")
+    
+    if signal: query['final_signal'] = {'$regex': signal, '$options': 'i'}
+    if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
+    if min_score > 0: query['final_combined_score'] = {'$gte': min_score}
+    
+    data = list(col.find(query, {'_id': 0}).sort('final_combined_score', -1).limit(limit))
+    return {"data": data}
+
+
+# ================================
+# FIX: swrsi endpoint - Latest = most recent date only
+# ================================
+@app.get("/api/swrsi")
+async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
+    col = get_mongo_collection("swrsi_signals")
+    if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
+    
+    query = {}
+    
+    if date:
+        query = build_date_query(date)
+    else:
+        # LATEST: most recent analysis_date
+        latest = list(col.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
+        if latest and latest[0].get('analysis_date'):
+            query = build_date_query(latest[0]['analysis_date'])
+            print(f"🔍 SWRSI: LATEST = {latest[0]['analysis_date']}")
+    
+    if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
+    
+    data = list(col.find(query, {'_id': 0}).sort('composite_score', -1))
+    return {"signals": data, "total_signals": len(data)}
+
+
+# ================================
+# FIX: collection-symbols - Latest = most recent date only
+# ================================
+@app.get("/api/collection-symbols")
+async def get_collection_symbols(collection: str = Query(...), date: str = Query(None)):
+    col = get_mongo_collection(collection)
+    if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
+    
+    if date:
+        query = build_date_query(date)
+    else:
+        # LATEST: most recent analysis_date only
+        latest_doc = list(col.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
+        if latest_doc and latest_doc[0].get('analysis_date'):
+            query = build_date_query(latest_doc[0]['analysis_date'])
+        else:
+            query = {}
+    
+    syms = sorted(list(set([s for s in col.distinct('symbol', query) if s])))  # set() removes duplicates
+    print(f"📋 {collection}: {len(syms)} unique symbols for date={date or 'LATEST'}")
+    return syms
 
 # ================================
 # API Routes
