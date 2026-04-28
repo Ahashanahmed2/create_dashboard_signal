@@ -3,9 +3,9 @@ create_dashboard.py
 ✅ All Tabs with LTP + No Duplicate Date
 ✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
 ✅ AI Signals (37 cols) + SWRSI + S/R + MACD + EMA 200 + Daily Buy
-✅ Historical dates for ALL tabs
-✅ Alert system with column/value monitoring
-✅ Delete all data by date feature
+✅ Historical dates for ALL tabs - FIXED
+✅ LTP Alert system
+✅ Delete All by Date + Edit buttons
 ✅ UptimeRobot HEAD endpoint
 """
 
@@ -22,7 +22,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="13.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="14.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -31,7 +31,9 @@ def get_mongo_collection(collection_name=None):
         client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
         db = client[DATABASE_NAME]
         return db[collection_name or COLLECTION_NAME]
-    except: return None
+    except Exception as e:
+        print(f"MongoDB Connection Error: {e}")
+        return None
 
 # ================================
 # Bangladesh Timezone Helper
@@ -118,13 +120,36 @@ async def get_dse_ltp():
 
 @app.get("/api/dates")
 async def get_dates(collection: str = Query("daily_ai_signals")):
+    """Get all unique dates from a collection - handles both 'analysis_date' and 'date' fields"""
     col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-    dates = col.distinct('analysis_date')
-    # Also check for 'date' field (used by some collections)
-    date_dates = col.distinct('date')
-    all_dates = sorted(list(set(dates + date_dates)), reverse=True)
-    return all_dates
+    if col is None: 
+        return JSONResponse({"error": f"MongoDB not configured for {collection}"}, status_code=500)
+    
+    try:
+        # Get all unique dates from both possible date fields
+        dates_set = set()
+        
+        # Check for analysis_date field
+        analysis_dates = col.distinct('analysis_date')
+        dates_set.update([d for d in analysis_dates if d])
+        
+        # Check for date field
+        date_field_dates = col.distinct('date')
+        dates_set.update([d for d in date_field_dates if d])
+        
+        # Also check for any other date-like fields
+        try:
+            latest_date_dates = col.distinct('latest_date')
+            dates_set.update([d for d in latest_date_dates if d])
+        except:
+            pass
+            
+        all_dates = sorted(list(dates_set), reverse=True)
+        print(f"Found {len(all_dates)} dates in {collection}: {all_dates[:5]}...")  # Debug log
+        return all_dates
+    except Exception as e:
+        print(f"Error getting dates for {collection}: {e}")
+        return []
 
 @app.get("/api/swrsi/dates")
 async def get_swrsi_dates():
@@ -137,30 +162,43 @@ async def get_swrsi_dates():
 async def get_signals(date: str = Query(None), signal: str = Query(None), symbol: str = Query(None), min_score: float = Query(0), limit: int = Query(1000)):
     collection = get_mongo_collection()
     if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    
     query = {}
-    if date: query['analysis_date'] = date
+    if date: 
+        query['analysis_date'] = date
     else:
-        latest = list(collection.find().sort('analysis_date', -1).limit(1))
-        if latest: query['analysis_date'] = latest[0]['analysis_date']
+        # Get latest date with data
+        latest = list(collection.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
+        if latest and latest[0].get('analysis_date'):
+            query['analysis_date'] = latest[0]['analysis_date']
+    
     if signal: query['final_signal'] = {'$regex': signal, '$options': 'i'}
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
     if min_score > 0: query['final_combined_score'] = {'$gte': min_score}
+    
     cursor = collection.find(query, {'_id': 0}).sort('final_combined_score', -1).limit(limit)
-    return {"data": list(cursor)}
+    data = list(cursor)
+    print(f"Signals query: {query}, found {len(data)} records")  # Debug log
+    return {"data": data}
 
 @app.get("/api/swrsi")
 async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
     col = get_mongo_collection("swrsi_signals")
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    
     query = {}
-    if date: query['analysis_date'] = date
+    if date: 
+        query['analysis_date'] = date
     else:
-        latest = list(col.find().sort('analysis_date', -1).limit(1))
-        if latest: query['analysis_date'] = latest[0]['analysis_date']
+        latest = list(col.find({'analysis_date': {'$exists': True}}).sort('analysis_date', -1).limit(1))
+        if latest and latest[0].get('analysis_date'):
+            query['analysis_date'] = latest[0]['analysis_date']
+    
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
+    
     data = list(col.find(query, {'_id': 0}).sort('composite_score', -1))
-    all_dates = sorted(col.distinct('analysis_date'), reverse=True)
-    return {"signals": data, "total_signals": len(data), "available_dates": all_dates}
+    print(f"SWRSI query: {query}, found {len(data)} records")  # Debug log
+    return {"signals": data, "total_signals": len(data), "available_dates": sorted(col.distinct('analysis_date'), reverse=True)}
 
 @app.get("/api/stats")
 async def get_stats(date: str = Query(None)):
@@ -178,23 +216,43 @@ async def get_stats(date: str = Query(None)):
 
 @app.get("/api/generic-data")
 async def get_generic_data(collection: str = Query(...), date: str = Query(None), symbol: str = Query(None), limit: int = Query(500)):
+    """Get data from generic collections with proper date handling"""
     col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if col is None: 
+        return JSONResponse({"error": f"Collection {collection} not found"}, status_code=500)
+    
     query = {}
     if date:
-        # Try both analysis_date and date fields
-        query['$or'] = [{'analysis_date': date}, {'date': date}]
-    if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    data = list(col.find(query, {'_id': 0}).limit(limit))
-    return {"data": data}
+        # Try both date fields
+        query['$or'] = [
+            {'analysis_date': date},
+            {'date': date},
+            {'latest_date': date}
+        ]
+    
+    if symbol: 
+        query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
+    
+    try:
+        data = list(col.find(query, {'_id': 0}).limit(limit))
+        print(f"Generic query on {collection}: date={date}, found {len(data)} records")  # Debug log
+        return {"data": data}
+    except Exception as e:
+        print(f"Error in generic-data for {collection}: {e}")
+        return {"data": [], "error": str(e)}
 
 @app.delete("/api/delete-signal")
 async def delete_signal(collection: str = Query("daily_ai_signals"), symbol: str = Query(...), date: str = Query(...)):
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    
+    # Try both date fields
     result = col.delete_one({'symbol': symbol, 'analysis_date': date})
     if result.deleted_count == 0:
         result = col.delete_one({'symbol': symbol, 'date': date})
+    if result.deleted_count == 0:
+        result = col.delete_one({'symbol': symbol, 'latest_date': date})
+    
     return {"deleted": result.deleted_count}
 
 @app.delete("/api/delete-all-by-date")
@@ -202,9 +260,13 @@ async def delete_all_by_date(collection: str = Query(...), date: str = Query(...
     """Delete ALL records for a specific date in a collection"""
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    
+    # Delete from all possible date fields
     result1 = col.delete_many({'analysis_date': date})
     result2 = col.delete_many({'date': date})
-    total = result1.deleted_count + result2.deleted_count
+    result3 = col.delete_many({'latest_date': date})
+    
+    total = result1.deleted_count + result2.deleted_count + result3.deleted_count
     return {"deleted": total, "collection": collection, "date": date}
 
 @app.put("/api/update-trade")
@@ -228,76 +290,55 @@ async def dashboard():
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>🤖 AI Trading Signals</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <title>🤖 AI Trading Signals Dashboard v14</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: sans-serif; background: #0a0a0f; color: #e0e0e0; padding: 20px; }
-        .header { text-align: center; padding: 30px; background: linear-gradient(45deg, #1a1a2e, #0f3460); border-radius: 15px; margin-bottom: 20px; }
-        .header h1 { font-size: 2.2em; background: linear-gradient(90deg, #00d4ff, #7b2ff7, #ff6b6b); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .alert-box { background: #ff4757; color: #fff; padding: 15px; border-radius: 10px; margin: 15px 0; text-align: center; font-size: 1.3em; font-weight: bold; display: none; animation: pulse 1s infinite; }
+        body { font-family: 'Segoe UI', sans-serif; background: #0a0a0f; color: #e0e0e0; padding: 20px; }
+        .header { text-align: center; padding: 20px; background: linear-gradient(45deg, #1a1a2e, #0f3460); border-radius: 15px; margin-bottom: 20px; border: 1px solid #1a3a5c; }
+        .header h1 { font-size: 2em; background: linear-gradient(90deg, #00d4ff, #7b2ff7, #ff6b6b); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .alert-box { background: #ff4757; color: #fff; padding: 10px; border-radius: 10px; margin: 10px 0; text-align: center; font-size: 1.1em; font-weight: bold; display: none; animation: pulse 1s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
-        .tabs { display: flex; margin-bottom: 20px; background: #111; border-radius: 10px; overflow: hidden; flex-wrap: wrap; }
-        .tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; border-right: 1px solid #222; color: #aaa; min-width: 100px; }
+        .tabs { display: flex; margin-bottom: 15px; background: #111; border-radius: 10px; overflow: hidden; flex-wrap: wrap; border: 1px solid #222; }
+        .tab { flex: 1; padding: 12px 8px; text-align: center; cursor: pointer; border-right: 1px solid #222; color: #aaa; min-width: 80px; font-size: 0.85em; transition: all 0.3s; }
         .tab:last-child { border-right: none; }
         .tab.active { background: #1a1a2e; color: #00d4ff; font-weight: bold; }
-        .controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; align-items: center; }
-        select, input, button { padding: 10px 15px; background: #1a1a2e; color: #fff; border: 1px solid #333; border-radius: 8px; }
-        button { cursor: pointer; background: #0f3460; }
-        button:hover { background: #1a3a6e; }
-        .delete-all-btn { background: #ff4757; color: #fff; font-weight: bold; }
+        .tab:hover { background: #1a1a2e; }
+        .controls { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; background: #111; padding: 10px; border-radius: 10px; border: 1px solid #222; }
+        select, input, button { padding: 8px 12px; background: #1a1a2e; color: #fff; border: 1px solid #333; border-radius: 6px; font-size: 0.85em; }
+        button { cursor: pointer; background: #0f3460; transition: all 0.2s; }
+        button:hover { background: #1a4a7a; }
+        .delete-all-btn { background: #ff4757; color: #fff; font-weight: bold; margin-left: auto; }
         .delete-all-btn:hover { background: #ff2840; }
-        .alert-config-btn { background: #ffa500; color: #000; font-weight: bold; }
-        .alert-config-btn:hover { background: #ffb732; }
-        table { width: 100%; border-collapse: collapse; font-size: 0.7em; background: #111122; border-radius: 10px; overflow: hidden; }
-        th { background: #1a1a2e; padding: 10px 5px; color: #00d4ff; white-space: nowrap; }
-        td { padding: 5px; border-bottom: 1px solid #222; white-space: nowrap; }
-        .edit-btn { background: #ffa500; color: #000; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
-        .delete-btn { background: #ff4757; color: #fff; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
-        .save-btn { background: #00ff88; color: #000; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
-        .edited-badge { background: #ffa500; color: #000; padding: 2px 6px; border-radius: 10px; font-size: 0.7em; margin-left: 5px; }
-        .editable-input { background: #1a1a2e; color: #fff; border: 1px solid #ffa500; padding: 3px; width: 65px; border-radius: 4px; font-size: 0.9em; }
+        .alert-ltp-input { width: 60px; text-align: center; background: #1a1a2e; color: #ffa500; border: 1px solid #ffa500; padding: 8px; border-radius: 6px; font-weight: bold; }
+        .clear-alert-btn { background: #666; padding: 8px 12px; font-size: 0.8em; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.65em; background: #111122; border-radius: 10px; overflow: hidden; border: 1px solid #222; }
+        th { background: #1a1a2e; padding: 8px 4px; color: #00d4ff; white-space: nowrap; font-size: 0.9em; position: sticky; top: 0; z-index: 10; }
+        td { padding: 4px; border-bottom: 1px solid #222; white-space: nowrap; }
+        tr:hover { background: #1a1a2e40; }
+        .edit-btn { background: #ffa500; color: #000; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 0.7em; margin: 1px; }
+        .delete-btn { background: #ff4757; color: #fff; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 0.7em; margin: 1px; }
+        .save-btn { background: #00ff88; color: #000; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 0.7em; margin: 1px; }
+        .edited-badge { background: #ffa500; color: #000; padding: 1px 4px; border-radius: 8px; font-size: 0.6em; margin-left: 3px; }
+        .editable-input { background: #1a1a2e; color: #fff; border: 1px solid #ffa500; padding: 2px; width: 55px; border-radius: 3px; font-size: 0.8em; }
         .signal-SB { color: #00ff88; font-weight: bold; }
         .signal-B { color: #00cc66; font-weight: bold; }
         .signal-H { color: #ffd700; }
         .signal-S { color: #ff4757; }
         .signal-SS { color: #ff0000; font-weight: bold; }
-        .alert-active { background: #ff475720 !important; animation: alertBlink 0.5s infinite; }
-        @keyframes alertBlink { 0%,100% { background: #ff475720; } 50% { background: #ff475740; } }
-        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; justify-content: center; align-items: center; }
-        .modal.open { display: flex; }
-        .modal-content { background: #1a1a2e; padding: 25px; border-radius: 15px; max-width: 500px; width: 90%; border: 2px solid #ffa500; }
-        .modal-content h3 { color: #ffa500; margin-bottom: 15px; }
-        .alert-rule { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
-        .alert-rule select, .alert-rule input { flex: 1; min-width: 100px; }
-        .remove-rule-btn { background: #ff4757; padding: 5px 10px; font-size: 0.8em; }
-        .active-alerts-panel { background: #0f3460; padding: 10px; border-radius: 8px; margin-top: 10px; display: none; }
-        .active-alerts-panel.show { display: block; }
-        .active-alert-item { background: #ff475720; padding: 8px; margin: 5px 0; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85em; }
-        .active-alert-item span { color: #ffa500; }
-        @media (max-width: 768px) { .header h1 { font-size: 1.5em; } }
+        .ltp-alert-row { animation: ltpBlink 0.8s infinite; }
+        @keyframes ltpBlink { 0%,100% { background: #ff475720; } 50% { background: #ff475740; } }
+        .ltp-above { color: #00ff88 !important; }
+        .ltp-below { color: #ff4757 !important; }
+        .debug-info { font-size: 0.7em; color: #666; margin-top: 10px; }
+        @media (max-width: 768px) { .header h1 { font-size: 1.3em; } .controls { flex-direction: column; } }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🤖 AI Trading Signals Dashboard</h1>
-        <p id="marketStatus">Checking DSE status...</p>
+        <h1>🤖 AI Trading Signals Dashboard v14</h1>
+        <p id="marketStatus" style="font-size:0.85em;margin-top:5px;">Checking DSE status...</p>
     </div>
     <div id="alertBox" class="alert-box">⚠️ DSE CLOSING IN 10 MINUTES!</div>
-    
-    <!-- Alert Modal -->
-    <div id="alertModal" class="modal">
-        <div class="modal-content">
-            <h3>🔔 Configure Alerts</h3>
-            <p style="font-size:0.8em;color:#888;">Set conditions: if value > or < threshold, row blinks</p>
-            <div id="alertRules"></div>
-            <button onclick="addAlertRule()" style="margin-top:10px;width:100%;">+ Add Rule</button>
-            <div style="margin-top:15px;display:flex;gap:10px;">
-                <button onclick="saveAlertConfig()" style="flex:1;background:#00ff88;color:#000;">💾 Save</button>
-                <button onclick="closeAlertModal()" style="flex:1;">Cancel</button>
-            </div>
-        </div>
-    </div>
     
     <div class="tabs">
         <div class="tab active" onclick="switchTab('ai_signals')">🤖 AI Signals</div>
@@ -307,97 +348,186 @@ async def dashboard():
         <div class="tab" onclick="switchTab('ema')">📈 EMA 200</div>
         <div class="tab" onclick="switchTab('buy')">✅ Daily Buy</div>
     </div>
-    <div class="controls" id="allControls">
+    
+    <div class="controls">
         <label>📅 Date:</label>
-        <select id="dateSelect" onchange="loadCurrentTab()"><option value="">Latest</option></select>
+        <select id="dateSelect" onchange="onDateChange()"><option value="">Latest</option></select>
         <label>🔍 Symbol:</label>
-        <input type="text" id="symbolSearch" onkeyup="loadCurrentTab()" style="width:120px;">
+        <input type="text" id="symbolSearch" onkeyup="loadCurrentTab()" style="width:100px;">
         <button onclick="loadCurrentTab()">🔄 Refresh</button>
-        <button class="alert-config-btn" onclick="openAlertModal()">🔔 Alerts</button>
+        <label style="margin-left:10px;">🔔 LTP Alert:</label>
+        <input type="number" id="ltpAlertPrice" class="alert-ltp-input" placeholder="Price" step="0.01" onchange="renderCurrentTab()">
+        <button class="clear-alert-btn" onclick="clearLtpAlert()">Clear</button>
         <button class="delete-all-btn" onclick="deleteAllByDate()">🗑️ Delete All (Date)</button>
-        <span id="recordCount" style="color:#888;"></span>
+        <span id="recordCount" style="color:#888;margin-left:5px;font-size:0.8em;"></span>
     </div>
-    <div id="activeAlertsPanel" class="active-alerts-panel">
-        <strong style="color:#ffa500;">⚠️ Active Alerts:</strong>
-        <div id="activeAlertsList"></div>
-    </div>
-    <div style="overflow-x:auto;" id="dynamicTable"></div>
+    
+    <div id="ltpAlertStatus" style="background:#0f3460;padding:6px 12px;border-radius:6px;margin-bottom:8px;display:none;color:#ffa500;font-size:0.8em;"></div>
+    
+    <div style="overflow-x:auto;max-height:70vh;" id="dynamicTable"></div>
+    
+    <div class="debug-info" id="debugInfo"></div>
 
     <script>
         let currentTab = 'ai_signals';
         let currentData = [];
         let dseLtpData = {};
         let editingRow = null;
-        let alertConfig = JSON.parse(localStorage.getItem('alertConfig') || '{"rules":[],"enabled":true}');
-        let triggeredAlerts = new Set();
+        let ltpAlertPrice = null;
 
-        loadDates('daily_ai_signals');
+        // Collection mapping
+        const COLLECTION_MAP = { 
+            ai_signals: 'daily_ai_signals', 
+            swrsi: 'swrsi_signals', 
+            support: 'support_resistance', 
+            macd: 'macd_signals', 
+            ema: 'ema_200_signals', 
+            buy: 'daily_buy_signals' 
+        };
+
+        // Initialize
+        loadDates(COLLECTION_MAP[currentTab]);
         loadCurrentTab();
         checkMarketStatus();
         loadDseLtp();
+        
+        // Refresh intervals
         setInterval(checkMarketStatus, 60000);
         setInterval(async () => {
             const res = await fetch('/api/market-status');
             const status = await res.json();
             if (status.is_open) loadDseLtp();
         }, 60000);
-
-        // Alert checking interval
-        setInterval(() => { if (alertConfig.enabled && alertConfig.rules.length > 0) renderCurrentTab(); }, 5000);
+        setInterval(loadDseLtp, 300000); // Refresh LTP every 5 min
 
         async function checkMarketStatus() {
-            const res = await fetch('/api/market-status');
-            const s = await res.json();
-            document.getElementById('marketStatus').innerHTML = s.is_open 
-                ? `🟢 DSE MARKET OPEN | ${s.bangladesh_time || ''}`
-                : `🔴 DSE CLOSED | Opens ${s.next_open || 'next session'} | ${s.bangladesh_time || ''}`;
-            document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
+            try {
+                const res = await fetch('/api/market-status');
+                const s = await res.json();
+                document.getElementById('marketStatus').innerHTML = s.is_open 
+                    ? `🟢 DSE MARKET OPEN | ${s.bangladesh_time || ''}`
+                    : `🔴 DSE CLOSED | Opens ${s.next_open || 'next session'} | ${s.bangladesh_time || ''}`;
+                document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
+            } catch(e) {
+                console.error('Market status error:', e);
+            }
         }
 
         async function loadDseLtp() {
             try { 
                 const r = await fetch('/api/dse-ltp'); 
                 const j = await r.json(); 
-                if (j.status === 'live') dseLtpData = j.ltp_data || {}; 
-                else dseLtpData = {}; 
-                renderCurrentTab();
-            } catch(e) {}
+                if (j.status === 'live') {
+                    dseLtpData = j.ltp_data || {};
+                    renderCurrentTab();
+                }
+            } catch(e) {
+                console.error('LTP load error:', e);
+            }
         }
 
-        async function loadDates(c) { 
-            const r = await fetch(`/api/dates?collection=${c}`); 
-            const d = await r.json(); 
-            const s = document.getElementById('dateSelect'); 
-            s.innerHTML = '<option value="">Latest</option>'; 
-            if (Array.isArray(d)) {
-                d.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); });
+        function clearLtpAlert() {
+            document.getElementById('ltpAlertPrice').value = '';
+            ltpAlertPrice = null;
+            document.getElementById('ltpAlertStatus').style.display = 'none';
+            renderCurrentTab();
+        }
+
+        function getLtpAlertStatus(symbol) {
+            if (!ltpAlertPrice) return null;
+            const ltp = dseLtpData[symbol] || null;
+            if (ltp === null) return null;
+            if (ltp > ltpAlertPrice) return 'above';
+            if (ltp < ltpAlertPrice) return 'below';
+            return 'equal';
+        }
+
+        async function loadDates(collection) {
+            try {
+                const r = await fetch(`/api/dates?collection=${collection}`); 
+                const dates = await r.json(); 
+                const select = document.getElementById('dateSelect'); 
+                const currentValue = select.value;
+                select.innerHTML = '<option value="">Latest</option>'; 
+                
+                if (Array.isArray(dates) && dates.length > 0) {
+                    dates.forEach(date => { 
+                        if (date) {
+                            const option = document.createElement('option'); 
+                            option.value = date; 
+                            option.textContent = date; 
+                            select.appendChild(option); 
+                        }
+                    });
+                }
+                
+                // Restore previous selection if exists
+                if (currentValue && Array.from(select.options).some(o => o.value === currentValue)) {
+                    select.value = currentValue;
+                }
+                
+                document.getElementById('debugInfo').textContent = 
+                    `Collection: ${collection} | Dates found: ${dates.length} | Current tab: ${currentTab}`;
+            } catch(e) {
+                console.error('Load dates error:', e);
+                document.getElementById('debugInfo').textContent = `Error loading dates: ${e.message}`;
             }
+        }
+
+        function onDateChange() {
+            loadCurrentTab();
         }
 
         async function loadCurrentTab() {
             const date = document.getElementById('dateSelect').value;
             const symbol = document.getElementById('symbolSearch').value;
+            const alertPriceVal = document.getElementById('ltpAlertPrice').value;
+            ltpAlertPrice = alertPriceVal ? parseFloat(alertPriceVal) : null;
             
-            if (currentTab === 'ai_signals') {
-                let url = '/api/signals?limit=1000';
-                if (date) url += `&date=${date}`;
-                if (symbol) url += `&symbol=${symbol}`;
-                const r = await fetch(url); const j = await r.json();
-                currentData = j.data || [];
-            } else if (currentTab === 'swrsi') {
-                let url = '/api/swrsi?';
-                if (date) url += `date=${date}&`;
-                if (symbol) url += `symbol=${symbol}&`;
-                const r = await fetch(url); const j = await r.json();
-                currentData = j.signals || [];
+            // Update alert status display
+            if (ltpAlertPrice) {
+                document.getElementById('ltpAlertStatus').style.display = 'block';
+                document.getElementById('ltpAlertStatus').innerHTML = 
+                    `🔔 LTP Alert: Monitoring at <strong>${ltpAlertPrice.toFixed(2)}</strong> | 
+                     <span style="color:#00ff88;">Above=Green↑</span> | 
+                     <span style="color:#ff4757;">Below=Red↓</span>`;
             } else {
-                const map = { support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
-                let url = `/api/generic-data?collection=${map[currentTab]}&limit=500`;
-                if (date) url += `&date=${date}`;
-                if (symbol) url += `&symbol=${symbol}`;
-                const r = await fetch(url); const j = await r.json();
-                currentData = j.data || [];
+                document.getElementById('ltpAlertStatus').style.display = 'none';
             }
+            
+            try {
+                if (currentTab === 'ai_signals') {
+                    let url = '/api/signals?limit=1000';
+                    if (date) url += `&date=${encodeURIComponent(date)}`;
+                    if (symbol) url += `&symbol=${encodeURIComponent(symbol)}`;
+                    const r = await fetch(url); 
+                    const j = await r.json();
+                    currentData = j.data || [];
+                } else if (currentTab === 'swrsi') {
+                    let url = '/api/swrsi?';
+                    if (date) url += `date=${encodeURIComponent(date)}&`;
+                    if (symbol) url += `symbol=${encodeURIComponent(symbol)}&`;
+                    const r = await fetch(url); 
+                    const j = await r.json();
+                    currentData = j.signals || [];
+                } else {
+                    const collection = COLLECTION_MAP[currentTab];
+                    let url = `/api/generic-data?collection=${encodeURIComponent(collection)}&limit=500`;
+                    if (date) url += `&date=${encodeURIComponent(date)}`;
+                    if (symbol) url += `&symbol=${encodeURIComponent(symbol)}`;
+                    const r = await fetch(url); 
+                    const j = await r.json();
+                    currentData = j.data || [];
+                }
+                
+                document.getElementById('debugInfo').textContent += 
+                    ` | Data loaded: ${currentData.length} records`;
+            } catch(e) {
+                console.error('Load data error:', e);
+                currentData = [];
+                document.getElementById('debugInfo').textContent += ` | Error: ${e.message}`;
+            }
+            
             renderCurrentTab();
         }
 
@@ -405,125 +535,89 @@ async def dashboard():
             if (currentTab === 'ai_signals') renderAITable();
             else if (currentTab === 'swrsi') renderSWRSITable();
             else renderGenericTable();
-            updateActiveAlertsPanel();
         }
 
-        function switchTab(t) {
-            document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             event.target.classList.add('active');
-            currentTab = t;
+            currentTab = tabName;
+            
+            // Reset filters
             document.getElementById('symbolSearch').value = '';
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
-            loadDates(map[t]);
+            document.getElementById('ltpAlertPrice').value = '';
+            ltpAlertPrice = null;
+            document.getElementById('ltpAlertStatus').style.display = 'none';
+            
+            // Load dates for new tab
+            const collection = COLLECTION_MAP[tabName];
+            loadDates(collection);
             loadCurrentTab();
         }
 
-        function getSignalClass(s) {
-            if (!s) return '';
-            if (s.includes('STRONG BUY')) return 'signal-SB';
-            if (s.includes('BUY')) return 'signal-B';
-            if (s.includes('HOLD')) return 'signal-H';
-            if (s.includes('STRONG SELL')) return 'signal-SS';
-            if (s.includes('SELL')) return 'signal-S';
+        function getSignalClass(signal) {
+            if (!signal) return '';
+            if (signal.includes('STRONG BUY')) return 'signal-SB';
+            if (signal.includes('BUY')) return 'signal-B';
+            if (signal.includes('HOLD')) return 'signal-H';
+            if (signal.includes('STRONG SELL')) return 'signal-SS';
+            if (signal.includes('SELL')) return 'signal-S';
             return '';
         }
 
         function getLtpDisplay(symbol) {
             const ltp = dseLtpData[symbol] || null;
-            return ltp ? `<span style="color:#00ff88;font-weight:bold;">${ltp.toFixed(2)}</span>` : '<span style="color:#888;">-</span>';
+            const alertStatus = getLtpAlertStatus(symbol);
+            
+            if (!ltp) return '<span style="color:#888;">-</span>';
+            
+            let cssClass = '';
+            let arrow = '';
+            if (alertStatus === 'above') {
+                cssClass = 'ltp-above';
+                arrow = ' ↑';
+            } else if (alertStatus === 'below') {
+                cssClass = 'ltp-below';
+                arrow = ' ↓';
+            }
+            
+            return `<span class="${cssClass}" style="font-weight:bold;">${ltp.toFixed(2)}${arrow}</span>`;
         }
 
-        function startEdit(symbol, date, entry, sl, tp, i) { editingRow = { symbol, date, rowIndex: i }; renderAITable(); }
-        function cancelEdit() { editingRow = null; renderAITable(); }
+        function startEdit(symbol, date, entry, sl, tp, index) { 
+            editingRow = { symbol, date, rowIndex: index }; 
+            renderCurrentTab(); 
+        }
+        
+        function cancelEdit() { 
+            editingRow = null; 
+            renderCurrentTab(); 
+        }
 
         async function saveEdit(symbol, date) {
-            const entry = parseFloat(document.getElementById(`edit-entry-${symbol}`).value) || 0;
-            const sl = parseFloat(document.getElementById(`edit-sl-${symbol}`).value) || 0;
-            const tp = parseFloat(document.getElementById(`edit-tp-${symbol}`).value) || 0;
-            const params = new URLSearchParams({ symbol, date, entry_price: entry, stop_loss: sl, target_price: tp });
-            await fetch(`/api/update-trade?${params}`, { method: 'PUT' });
-            editingRow = null;
-            loadCurrentTab();
-        }
-
-        // ===== ALERT SYSTEM =====
-        function checkAlert(row) {
-            if (!alertConfig.enabled || !alertConfig.rules.length) return false;
-            for (const rule of alertConfig.rules) {
-                const val = parseFloat(row[rule.field]);
-                if (isNaN(val)) continue;
-                if (rule.operator === '>' && val > rule.threshold) {
-                    triggeredAlerts.add(`${row.symbol}-${rule.field}`);
-                    return true;
-                }
-                if (rule.operator === '<' && val < rule.threshold) {
-                    triggeredAlerts.add(`${row.symbol}-${rule.field}`);
-                    return true;
-                }
-            }
-            triggeredAlerts.delete(`${row.symbol}-${rule.field}`);
-            return false;
-        }
-
-        function openAlertModal() {
-            document.getElementById('alertModal').classList.add('open');
-            renderAlertRules();
-        }
-
-        function closeAlertModal() {
-            document.getElementById('alertModal').classList.remove('open');
-        }
-
-        function renderAlertRules() {
-            const div = document.getElementById('alertRules');
-            div.innerHTML = '';
-            alertConfig.rules.forEach((rule, i) => {
-                div.innerHTML += `
-                    <div class="alert-rule">
-                        <select onchange="alertConfig.rules[${i}].field=this.value">
-                            <option value="${rule.field}" selected>${rule.field}</option>
-                        </select>
-                        <select onchange="alertConfig.rules[${i}].operator=this.value">
-                            <option value=">" ${rule.operator=='>'?'selected':''}>&gt;</option>
-                            <option value="<" ${rule.operator=='<'?'selected':''}>&lt;</option>
-                        </select>
-                        <input type="number" step="any" value="${rule.threshold}" onchange="alertConfig.rules[${i}].threshold=parseFloat(this.value)" placeholder="Threshold">
-                        <button class="remove-rule-btn" onclick="removeAlertRule(${i})">✕</button>
-                    </div>`;
+            const safeId = symbol.replace(/[^a-zA-Z0-9]/g, '_');
+            const entryEl = document.getElementById(`edit-entry-${safeId}`);
+            const slEl = document.getElementById(`edit-sl-${safeId}`);
+            const tpEl = document.getElementById(`edit-tp-${safeId}`);
+            
+            const entry = entryEl ? parseFloat(entryEl.value) || 0 : 0;
+            const sl = slEl ? parseFloat(slEl.value) || 0 : 0;
+            const tp = tpEl ? parseFloat(tpEl.value) || 0 : 0;
+            
+            const params = new URLSearchParams({ 
+                symbol, date, 
+                entry_price: entry, 
+                stop_loss: sl, 
+                target_price: tp 
             });
-        }
-
-        function addAlertRule() {
-            alertConfig.rules.push({ field: 'final_combined_score', operator: '>', threshold: 80 });
-            renderAlertRules();
-        }
-
-        function removeAlertRule(i) {
-            alertConfig.rules.splice(i, 1);
-            renderAlertRules();
-        }
-
-        function saveAlertConfig() {
-            localStorage.setItem('alertConfig', JSON.stringify(alertConfig));
-            triggeredAlerts.clear();
-            closeAlertModal();
-            renderCurrentTab();
-        }
-
-        function updateActiveAlertsPanel() {
-            const panel = document.getElementById('activeAlertsPanel');
-            const list = document.getElementById('activeAlertsList');
-            if (alertConfig.enabled && alertedRows.size > 0) {
-                panel.classList.add('show');
-                list.innerHTML = Array.from(alertedRows).map(r => 
-                    `<div class="active-alert-item"><span>🔔</span> ${r.symbol} triggered alerts <span>${Array.from(triggeredAlerts).filter(a=>a.startsWith(r.symbol)).join(', ')}</span></div>`
-                ).join('');
-            } else {
-                panel.classList.remove('show');
+            
+            try {
+                await fetch(`/api/update-trade?${params}`, { method: 'PUT' });
+                editingRow = null;
+                loadCurrentTab();
+            } catch(e) {
+                alert('Save failed: ' + e.message);
             }
         }
-
-        let alertedRows = new Set();
 
         async function deleteAllByDate() {
             const date = document.getElementById('dateSelect').value;
@@ -531,20 +625,29 @@ async def dashboard():
                 alert('⚠️ Please select a date first!');
                 return;
             }
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
-            const collection = map[currentTab];
-            if (!confirm(`⚠️ DELETE ALL records for ${date} in ${collection}?\\nThis cannot be undone!`)) return;
-            const r = await fetch(`/api/delete-all-by-date?collection=${collection}&date=${date}`, { method: 'DELETE' });
-            const result = await r.json();
-            alert(`✅ Deleted ${result.deleted} records for ${date}`);
-            loadCurrentTab();
+            
+            const collection = COLLECTION_MAP[currentTab];
+            if (!confirm(`⚠️ DELETE ALL records for ${date}\\nCollection: ${collection}\\n\\nThis cannot be undone!\\n\\nClick OK to confirm.`)) return;
+            
+            try {
+                const r = await fetch(`/api/delete-all-by-date?collection=${encodeURIComponent(collection)}&date=${encodeURIComponent(date)}`, { method: 'DELETE' });
+                const result = await r.json();
+                alert(`✅ Deleted ${result.deleted} records for ${date}`);
+                loadDates(collection);
+                loadCurrentTab();
+            } catch(e) {
+                alert('Delete failed: ' + e.message);
+            }
         }
 
         function renderAITable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
+            if (!currentData.length) { 
+                div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data for selected date</p>'; 
+                document.getElementById('recordCount').textContent = '(0 signals)';
+                return; 
+            }
             
-            alertedRows.clear();
             let html = `<table><thead><tr>
                 <th>#</th><th>Symbol</th><th>Date</th><th>Price</th><th>LTP</th><th>Sector</th>
                 <th>Signal</th><th>Score</th><th>LLM</th><th>LLM%</th><th>LLM Str</th>
@@ -554,44 +657,72 @@ async def dashboard():
                 <th>E Acc</th><th>E Tot</th><th>E Wave</th><th>Sub-Wave</th>
                 <th>Cur Wave</th><th>W Conf</th><th>Bull?</th><th>W Pos</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>R:R</th>
-                <th>Act</th>
+                <th>✏️ Act</th>
             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
-                const isEditing = editingRow && editingRow.symbol === r.symbol && editingRow.date === r.analysis_date;
+                const safeId = (r.symbol || '').replace(/[^a-zA-Z0-9]/g, '_');
+                const isEditing = editingRow && editingRow.symbol === r.symbol;
                 const isEdited = r.edited === true;
                 const ltpDisplay = getLtpDisplay(r.symbol);
-                const entryCell = isEditing ? `<input class="editable-input" id="edit-entry-${r.symbol}" value="${(r.entry_price||0).toFixed(2)}">` : (r.entry_price||0).toFixed(2);
-                const slCell = isEditing ? `<input class="editable-input" id="edit-sl-${r.symbol}" value="${(r.stop_loss||0).toFixed(2)}">` : (r.stop_loss||0).toFixed(2);
-                const tpCell = isEditing ? `<input class="editable-input" id="edit-tp-${r.symbol}" value="${(r.target_price||0).toFixed(2)}">` : (r.target_price||0).toFixed(2);
+                const alertStatus = getLtpAlertStatus(r.symbol);
+                const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
+                
+                const entryCell = isEditing 
+                    ? `<input class="editable-input" id="edit-entry-${safeId}" value="${(r.entry_price||0).toFixed(2)}">` 
+                    : (r.entry_price||0).toFixed(2);
+                const slCell = isEditing 
+                    ? `<input class="editable-input" id="edit-sl-${safeId}" value="${(r.stop_loss||0).toFixed(2)}">` 
+                    : (r.stop_loss||0).toFixed(2);
+                const tpCell = isEditing 
+                    ? `<input class="editable-input" id="edit-tp-${safeId}" value="${(r.target_price||0).toFixed(2)}">` 
+                    : (r.target_price||0).toFixed(2);
+                
                 const actionCell = isEditing 
-                    ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>`
-                    : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}')">🗑️</button>`;
+                    ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date}')">💾Save</button>
+                       <button class="delete-btn" onclick="cancelEdit()">❌Cancel</button>`
+                    : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️Edit</button>
+                       <button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}','ai_signals')">🗑️</button>`;
                 
-                const alertRow = checkAlert({symbol: r.symbol, final_combined_score: r.final_combined_score, xgb_confidence: r.xgb_confidence, llm_confidence: r.llm_confidence, current_price: r.current_price, agentic_score: r.agentic_score, elliott_accuracy: r.elliott_accuracy});
-                if (alertRow) alertedRows.add({symbol: r.symbol});
-                
-                html += `<tr class="${alertRow ? 'alert-active' : ''}">
-                    <td>${i+1}</td><td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${alertRow ? ' 🔔' : ''}</strong></td>
-                    <td>${r.analysis_date||''}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${ltpDisplay}</td>
-                    <td>${r.sector||''}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
+                html += `<tr class="${alertRowClass}">
+                    <td>${i+1}</td>
+                    <td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${alertStatus ? ' 🔔' : ''}</strong></td>
+                    <td>${r.analysis_date||''}</td>
+                    <td>${(r.current_price||0).toFixed(2)}</td>
+                    <td>${ltpDisplay}</td>
+                    <td>${r.sector||''}</td>
+                    <td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
                     <td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td>
-                    <td>${r.llm_signal||''}</td><td>${(r.llm_confidence||0).toFixed(0)}%</td>
-                    <td>${r.llm_strength||''}</td><td>${r.llm_bias||''}</td><td>${r.llm_available ? '✅' : '❌'}</td>
-                    <td>${r.xgb_signal||''}</td><td>${(r.xgb_confidence||0).toFixed(0)}%</td>
-                    <td>${(r.xgb_prob_up||0).toFixed(3)}</td><td>${(r.xgb_auc||0).toFixed(3)}</td>
+                    <td>${r.llm_signal||''}</td>
+                    <td>${(r.llm_confidence||0).toFixed(0)}%</td>
+                    <td>${r.llm_strength||''}</td>
+                    <td>${r.llm_bias||''}</td>
+                    <td>${r.llm_available ? '✅' : '❌'}</td>
+                    <td>${r.xgb_signal||''}</td>
+                    <td>${(r.xgb_confidence||0).toFixed(0)}%</td>
+                    <td>${(r.xgb_prob_up||0).toFixed(3)}</td>
+                    <td>${(r.xgb_auc||0).toFixed(3)}</td>
                     <td>${r.xgb_available ? '✅' : '❌'}</td>
-                    <td>${r.ppo_signal||''}</td><td>${(r.ppo_confidence||0).toFixed(0)}%</td>
-                    <td>${r.ppo_available ? '✅' : '❌'}</td><td>${r.ppo_weight||0}</td>
-                    <td>${(r.agentic_score||0).toFixed(1)}</td><td>${r.agentic_bias||''}</td>
+                    <td>${r.ppo_signal||''}</td>
+                    <td>${(r.ppo_confidence||0).toFixed(0)}%</td>
+                    <td>${r.ppo_available ? '✅' : '❌'}</td>
+                    <td>${r.ppo_weight||0}</td>
+                    <td>${(r.agentic_score||0).toFixed(1)}</td>
+                    <td>${r.agentic_bias||''}</td>
                     <td>${r.agentic_available ? '✅' : '❌'}</td>
-                    <td>${(r.elliott_accuracy||0).toFixed(1)}%</td><td>${r.elliott_total_predictions||0}</td>
-                    <td style="font-size:0.65em;">${(r.elliott_wave_count||'').substring(0,15)}</td>
-                    <td style="font-size:0.65em;max-width:100px;overflow:hidden;">${(r.elliott_sub_waves||'').substring(0,20)}</td>
-                    <td>${r.elliott_current_wave||''}</td><td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
-                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td><td>${r.elliott_wave_position||''}</td>
-                    <td>${entryCell}</td><td>${slCell}</td><td>${tpCell}</td>
-                    <td>${r.risk_reward_ratio||0}</td><td>${actionCell}</td>
+                    <td>${(r.elliott_accuracy||0).toFixed(1)}%</td>
+                    <td>${r.elliott_total_predictions||0}</td>
+                    <td style="font-size:0.6em;">${(r.elliott_wave_count||'').substring(0,12)}</td>
+                    <td style="font-size:0.6em;max-width:80px;overflow:hidden;">${(r.elliott_sub_waves||'').substring(0,15)}</td>
+                    <td>${r.elliott_current_wave||''}</td>
+                    <td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
+                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td>
+                    <td>${r.elliott_wave_position||''}</td>
+                    <td>${entryCell}</td>
+                    <td>${slCell}</td>
+                    <td>${tpCell}</td>
+                    <td>${r.risk_reward_ratio||0}</td>
+                    <td>${actionCell}</td>
                 </tr>`;
             });
             html += '</tbody></table>';
@@ -601,9 +732,12 @@ async def dashboard():
 
         function renderSWRSITable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
+            if (!currentData.length) { 
+                div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals for selected date</p>'; 
+                document.getElementById('recordCount').textContent = '(0 signals)';
+                return; 
+            }
             
-            alertedRows.clear();
             let html = `<table><thead><tr>
                 <th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Composite Score</th>
                 <th>Weekly Div</th><th>Weekly Label</th><th>Weekly Score</th>
@@ -612,37 +746,52 @@ async def dashboard():
                 <th>Prev Week</th><th>Curr Week</th>
                 <th>Daily Div</th><th>Daily Strength</th>
                 <th>Daily Last RSI</th><th>Daily Prev RSI</th>
+                <th>🗑️</th>
             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const ltpDisplay = getLtpDisplay(r.symbol);
-                const alertRow = checkAlert({symbol: r.symbol, composite_score: r.composite_score, weekly_strength_score: r.weekly_strength_score, weekly_price_drop_pct: r.weekly_price_drop_pct, weekly_rsi_gain: r.weekly_rsi_gain});
-                if (alertRow) alertedRows.add({symbol: r.symbol});
+                const alertStatus = getLtpAlertStatus(r.symbol);
+                const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
                 
-                html += `<tr class="${alertRow ? 'alert-active' : ''}">
-                    <td>${i+1}</td><td><strong>${r.symbol || ''}${alertRow ? ' 🔔' : ''}</strong></td><td>${r.sector || ''}</td>
+                html += `<tr class="${alertRowClass}">
+                    <td>${i+1}</td>
+                    <td><strong>${r.symbol || ''}${alertStatus ? ' 🔔' : ''}</strong></td>
+                    <td>${r.sector || ''}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
-                    <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
+                    <td>${r.weekly_divergence || ''}</td>
+                    <td>${r.weekly_strength_label || ''}</td>
                     <td>${r.weekly_strength_score || 0}</td>
-                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td><td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td><td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
-                    <td>${r.weekly_prev_date || ''}</td><td>${r.weekly_curr_date || ''}</td>
-                    <td>${r.daily_divergence_type || ''}</td><td>${r.daily_divergence_strength || ''}</td>
-                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td><td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td>
+                    <td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
+                    <td>${r.weekly_prev_date || ''}</td>
+                    <td>${r.weekly_curr_date || ''}</td>
+                    <td>${r.daily_divergence_type || ''}</td>
+                    <td>${r.daily_divergence_strength || ''}</td>
+                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${r.analysis_date||r.date||''}','swrsi')">🗑️</button></td>
                 </tr>`;
             });
             html += '</tbody></table>';
             div.innerHTML = html;
+            document.getElementById('recordCount').textContent = `(${currentData.length} signals)`;
         }
 
         function renderGenericTable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
+            if (!currentData.length) { 
+                div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data for selected date</p>'; 
+                document.getElementById('recordCount').textContent = '(0 records)';
+                return; 
+            }
             
-            alertedRows.clear();
-            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'saved_at','symbol','date'];
+            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'saved_at', 'date'];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             
             let html = `<table><thead><tr>
@@ -653,15 +802,16 @@ async def dashboard():
             
             currentData.forEach((r, i) => {
                 const ltpDisplay = getLtpDisplay(r.symbol);
-                const alertRow = checkAlert({...r, symbol: r.symbol});
-                if (alertRow) alertedRows.add({symbol: r.symbol});
+                const alertStatus = getLtpAlertStatus(r.symbol);
+                const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
+                const recordDate = r.analysis_date || r.date || r.latest_date || '';
                 
-                html += `<tr class="${alertRow ? 'alert-active' : ''}">
+                html += `<tr class="${alertRowClass}">
                     <td>${i+1}</td>
-                    <td><strong>${r.symbol || ''}${alertRow ? ' 🔔' : ''}</strong></td>
+                    <td><strong>${r.symbol || ''}${alertStatus ? ' 🔔' : ''}</strong></td>
                     <td>${ltpDisplay}</td>
                     ${keys.map(k => `<td>${r[k]??''}</td>`).join('')}
-                    <td><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${r.analysis_date||r.date||''}','${currentTab}')">🗑️</button></td>
+                    <td><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${recordDate}','${currentTab}')">🗑️</button></td>
                 </tr>`;
             });
             html += '</tbody></table>';
@@ -669,11 +819,15 @@ async def dashboard():
             document.getElementById('recordCount').textContent = `(${currentData.length} records)`;
         }
 
-        async function deleteRecord(symbol, date, tab = 'ai_signals') {
+        async function deleteRecord(symbol, date, tab) {
             if (!confirm(`Delete ${symbol}?`)) return;
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
-            await fetch(`/api/delete-signal?collection=${map[tab]}&symbol=${symbol}&date=${date}`, { method: 'DELETE' });
-            loadCurrentTab();
+            const collection = COLLECTION_MAP[tab] || COLLECTION_MAP[currentTab];
+            try {
+                await fetch(`/api/delete-signal?collection=${encodeURIComponent(collection)}&symbol=${encodeURIComponent(symbol)}&date=${encodeURIComponent(date)}`, { method: 'DELETE' });
+                loadCurrentTab();
+            } catch(e) {
+                alert('Delete failed: ' + e.message);
+            }
         }
     </script>
 </body>
@@ -683,6 +837,7 @@ async def dashboard():
 if __name__ == "__main__":
     import uvicorn
     PORT = int(os.environ.get("PORT", 8000))
-    print(f"🚀 Dashboard: http://localhost:{PORT}")
+    print(f"🚀 Dashboard v14: http://localhost:{PORT}")
     print(f"💚 Health Check: http://localhost:{PORT}/head")
+    print(f"📊 Debug dates API: http://localhost:{PORT}/api/dates?collection=daily_buy_signals")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
