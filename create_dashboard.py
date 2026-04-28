@@ -1,9 +1,9 @@
 """
-create_dashboard.py - v22 FINAL (MATCH with save_to_mongodb.py)
-✅ PRIMARY date field: analysis_date (matches save_to_mongodb.py)
-✅ FALLBACK: saved_at, date, level_date
-✅ ALL tabs work perfectly
-✅ LTP Alert Modal + Delete All + Edit buttons
+create_dashboard.py - v22 FINAL FIXED
+✅ PRIMARY date: analysis_date (matches save_to_mongodb.py)
+✅ LATEST = most recent analysis_date only (NO duplicates)
+✅ ALL tabs: AI Signals, SWRSI, S/R, MACD, EMA 200, Daily Buy
+✅ LTP Alert Modal + Delete All by Date + Edit buttons
 ✅ UptimeRobot HEAD endpoint
 """
 
@@ -44,179 +44,66 @@ def is_dse_market_open():
             ((hour == 10 and minute >= 0) or (10 < hour < 14) or (hour == 14 and minute <= 20)))
 
 # ================================
-# DATE MATCHING: analysis_date PRIMARY (matching save_to_mongodb.py)
+# DATE: analysis_date PRIMARY, saved_at FALLBACK
 # ================================
-# save_to_mongodb.py saves: analysis_date = date_column value
-# So primary lookup should be analysis_date, then fallback to saved_at, date, level_date
-
 def build_date_query(date_value):
-    """Build query: analysis_date FIRST, then fallback"""
     conditions = [
-        {'analysis_date': date_value},           # PRIMARY (matches save_to_mongodb.py)
+        {'analysis_date': date_value},
         {'analysis_date': {'$regex': f'^{date_value}'}},
-        {'saved_at': {'$regex': f'^{date_value}'}},  # FALLBACK
+        {'saved_at': {'$regex': f'^{date_value}'}},
         {'date': date_value},
         {'level_date': date_value},
         {'latest_date': date_value},
     ]
     return {'$or': conditions}
 
-# সম্পূর্ণ create_dashboard.py - শুধু পরিবর্তিত অংশগুলো দেখাচ্ছি
-
-# ================================
-# FIX: get_all_dates - আগের মতই
-# ================================
+def get_latest_date(collection_name):
+    """Find most recent analysis_date in collection"""
+    col = get_mongo_collection(collection_name)
+    if col is None: return None
+    
+    # Try analysis_date first
+    doc = col.find_one(
+        {'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}},
+        sort=[('analysis_date', -1)]
+    )
+    if doc and doc.get('analysis_date'):
+        return doc['analysis_date']
+    
+    # Fallback: saved_at
+    doc = col.find_one(
+        {'saved_at': {'$exists': True}},
+        sort=[('saved_at', -1)]
+    )
+    if doc and doc.get('saved_at'):
+        val = doc['saved_at']
+        if isinstance(val, str) and len(val) >= 10:
+            return val[:10]
+    
+    return None
 
 def get_all_dates(collection_name):
-    """Get dates: analysis_date FIRST, then fallback"""
     col = get_mongo_collection(collection_name)
     if col is None: return []
     
     dates_set = set()
     
-    # PRIMARY: analysis_date
-    try:
-        for d in col.distinct('analysis_date'):
-            if d:
-                if isinstance(d, datetime): dates_set.add(d.strftime('%Y-%m-%d'))
-                elif isinstance(d, str) and re.match(r'\d{4}-\d{2}-\d{2}', d.strip()): dates_set.add(d.strip())
-    except: pass
+    for d in col.distinct('analysis_date'):
+        if d:
+            if isinstance(d, datetime): dates_set.add(d.strftime('%Y-%m-%d'))
+            elif isinstance(d, str) and re.match(r'\d{4}-\d{2}-\d{2}', d.strip()): dates_set.add(d.strip())
     
-    # FALLBACK: saved_at
-    try:
-        docs = col.find({'saved_at': {'$exists': True}}, {'saved_at': 1}).limit(2000)
-        for doc in docs:
-            val = doc.get('saved_at', '')
-            if isinstance(val, str) and len(val) >= 10:
-                d = val[:10]
-                if re.match(r'\d{4}-\d{2}-\d{2}', d): dates_set.add(d)
-    except: pass
+    for doc in col.find({'saved_at': {'$exists': True}}, {'saved_at': 1}).limit(2000):
+        val = doc.get('saved_at', '')
+        if isinstance(val, str) and len(val) >= 10:
+            d = val[:10]
+            if re.match(r'\d{4}-\d{2}-\d{2}', d): dates_set.add(d)
     
-    # other fields
     for field in ['date', 'level_date', 'latest_date']:
-        try:
-            for d in col.distinct(field):
-                if isinstance(d, str) and re.match(r'\d{4}-\d{2}-\d{2}', d.strip()): dates_set.add(d.strip())
-        except: pass
+        for d in col.distinct(field):
+            if isinstance(d, str) and re.match(r'\d{4}-\d{2}-\d{2}', d.strip()): dates_set.add(d.strip())
     
-    all_dates = sorted(list(dates_set), reverse=True)
-    return all_dates
-
-
-# ================================
-# FIX: generic-data - Latest = most recent date only
-# ================================
-@app.get("/api/generic-data")
-async def get_generic_data(collection: str = Query(...), date: str = Query(None),
-                           symbol: str = Query(None), limit: int = Query(500)):
-    col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
-    
-    query = {}
-    
-    if date:
-        # Specific date selected
-        query = build_date_query(date)
-    else:
-        # LATEST: Find most recent analysis_date
-        latest_date = None
-        latest_doc = list(col.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
-        if latest_doc and latest_doc[0].get('analysis_date'):
-            latest_date = latest_doc[0]['analysis_date']
-        
-        if latest_date:
-            query = build_date_query(latest_date)
-            print(f"📊 {collection}: LATEST date = {latest_date}")
-        else:
-            # Fallback: try saved_at
-            latest_doc = list(col.find({'saved_at': {'$exists': True}}).sort('saved_at', -1).limit(1))
-            if latest_doc and latest_doc[0].get('saved_at'):
-                latest_date = latest_doc[0]['saved_at'][:10] if isinstance(latest_doc[0]['saved_at'], str) else ''
-                if latest_date:
-                    query = build_date_query(latest_date)
-    
-    if symbol: 
-        query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    
-    data = list(col.find(query, {'_id': 0}).limit(limit))
-    print(f"📊 {collection}: date={date or latest_date}, records={len(data)}")
-    return {"data": data}
-
-
-# ================================
-# FIX: signals endpoint - Latest = most recent date only
-# ================================
-@app.get("/api/signals")
-async def get_signals(date: str = Query(None), signal: str = Query(None), symbol: str = Query(None),
-                      min_score: float = Query(0), limit: int = Query(1000)):
-    col = get_mongo_collection()
-    if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
-    
-    query = {}
-    
-    if date:
-        query = build_date_query(date)
-    else:
-        # LATEST: most recent analysis_date
-        latest = list(col.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
-        if latest and latest[0].get('analysis_date'):
-            query = build_date_query(latest[0]['analysis_date'])
-            print(f"🔍 AI Signals: LATEST = {latest[0]['analysis_date']}")
-    
-    if signal: query['final_signal'] = {'$regex': signal, '$options': 'i'}
-    if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    if min_score > 0: query['final_combined_score'] = {'$gte': min_score}
-    
-    data = list(col.find(query, {'_id': 0}).sort('final_combined_score', -1).limit(limit))
-    return {"data": data}
-
-
-# ================================
-# FIX: swrsi endpoint - Latest = most recent date only
-# ================================
-@app.get("/api/swrsi")
-async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
-    col = get_mongo_collection("swrsi_signals")
-    if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
-    
-    query = {}
-    
-    if date:
-        query = build_date_query(date)
-    else:
-        # LATEST: most recent analysis_date
-        latest = list(col.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
-        if latest and latest[0].get('analysis_date'):
-            query = build_date_query(latest[0]['analysis_date'])
-            print(f"🔍 SWRSI: LATEST = {latest[0]['analysis_date']}")
-    
-    if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    
-    data = list(col.find(query, {'_id': 0}).sort('composite_score', -1))
-    return {"signals": data, "total_signals": len(data)}
-
-
-# ================================
-# FIX: collection-symbols - Latest = most recent date only
-# ================================
-@app.get("/api/collection-symbols")
-async def get_collection_symbols(collection: str = Query(...), date: str = Query(None)):
-    col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
-    
-    if date:
-        query = build_date_query(date)
-    else:
-        # LATEST: most recent analysis_date only
-        latest_doc = list(col.find({'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}).sort('analysis_date', -1).limit(1))
-        if latest_doc and latest_doc[0].get('analysis_date'):
-            query = build_date_query(latest_doc[0]['analysis_date'])
-        else:
-            query = {}
-    
-    syms = sorted(list(set([s for s in col.distinct('symbol', query) if s])))  # set() removes duplicates
-    print(f"📋 {collection}: {len(syms)} unique symbols for date={date or 'LATEST'}")
-    return syms
+    return sorted(list(dates_set), reverse=True)
 
 # ================================
 # API Routes
@@ -229,10 +116,10 @@ async def uptime_robot_head():
 async def market_status():
     now = get_bd_time()
     is_open = is_dse_market_open()
+    nx = None
     if not is_open:
         wd = now.weekday()
         nx = "Sunday 10:00 AM" if wd in [3,4,5] else "Tomorrow 10:00 AM"
-    else: nx = None
     return {"is_open": is_open, "next_open": nx, "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S')}
 
 @app.get("/api/dse-ltp")
@@ -255,93 +142,94 @@ async def get_dse_ltp():
     except: return {"status": "error"}
 
 @app.get("/api/dates")
-async def get_dates(collection: str = Query("daily_ai_signals")):
+async def api_get_dates(collection: str = Query("daily_ai_signals")):
     return get_all_dates(collection)
 
 @app.get("/api/collection-symbols")
-async def get_collection_symbols(collection: str = Query(...), date: str = Query(None)):
+async def api_get_symbols(collection: str = Query(...), date: str = Query(None)):
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
     
+    if not date:
+        date = get_latest_date(collection)
+    
     query = build_date_query(date) if date else {}
-    syms = sorted([s for s in col.distinct('symbol', query) if s])
-    print(f"📋 {collection}: {len(syms)} symbols for date={date}")
+    syms = sorted(list(set([s for s in col.distinct('symbol', query) if s])))
+    print(f"📋 {collection}: {len(syms)} symbols for date={date or 'LATEST'}")
     return syms
 
 @app.get("/api/signals")
-async def get_signals(date: str = Query(None), signal: str = Query(None), symbol: str = Query(None),
-                      min_score: float = Query(0), limit: int = Query(1000)):
+async def api_get_signals(date: str = Query(None), signal: str = Query(None), symbol: str = Query(None),
+                          min_score: float = Query(0), limit: int = Query(1000)):
     col = get_mongo_collection()
     if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
     
-    query = build_date_query(date) if date else {}
     if not date:
-        latest = list(col.find({'analysis_date': {'$exists': True}}).sort('analysis_date', -1).limit(1))
-        if latest and latest[0].get('analysis_date'): query['analysis_date'] = latest[0]['analysis_date']
+        date = get_latest_date("daily_ai_signals")
     
+    query = build_date_query(date) if date else {}
     if signal: query['final_signal'] = {'$regex': signal, '$options': 'i'}
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
     if min_score > 0: query['final_combined_score'] = {'$gte': min_score}
     
     data = list(col.find(query, {'_id': 0}).sort('final_combined_score', -1).limit(limit))
+    print(f"🔍 AI Signals: date={date}, records={len(data)}")
     return {"data": data}
 
 @app.get("/api/swrsi")
-async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
+async def api_get_swrsi(date: str = Query(None), symbol: str = Query(None)):
     col = get_mongo_collection("swrsi_signals")
     if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
     
-    query = build_date_query(date) if date else {}
     if not date:
-        latest = list(col.find({'analysis_date': {'$exists': True}}).sort('analysis_date', -1).limit(1))
-        if latest and latest[0].get('analysis_date'): query['analysis_date'] = latest[0]['analysis_date']
+        date = get_latest_date("swrsi_signals")
     
+    query = build_date_query(date) if date else {}
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
+    
     data = list(col.find(query, {'_id': 0}).sort('composite_score', -1))
+    print(f"🔍 SWRSI: date={date}, records={len(data)}")
     return {"signals": data, "total_signals": len(data)}
 
 @app.get("/api/generic-data")
-async def get_generic_data(collection: str = Query(...), date: str = Query(None),
-                           symbol: str = Query(None), limit: int = Query(500)):
+async def api_get_generic(collection: str = Query(...), date: str = Query(None),
+                          symbol: str = Query(None), limit: int = Query(500)):
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
+    
+    if not date:
+        date = get_latest_date(collection)
     
     query = build_date_query(date) if date else {}
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
     
     data = list(col.find(query, {'_id': 0}).limit(limit))
-    print(f"📊 {collection}: date={date}, records={len(data)}")
+    print(f"📊 {collection}: date={date or 'LATEST'}, records={len(data)}")
     return {"data": data}
 
 @app.delete("/api/delete-signal")
-async def delete_signal(collection: str = Query("daily_ai_signals"), symbol: str = Query(...), date: str = Query(...)):
+async def api_delete_signal(collection: str = Query("daily_ai_signals"), symbol: str = Query(...), date: str = Query(...)):
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
     
     r = col.delete_one({'symbol': symbol, 'analysis_date': date})
     if r.deleted_count == 0:
         r = col.delete_one({'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}})
-    if r.deleted_count == 0:
-        for f in ['date', 'level_date']:
-            r = col.delete_one({'symbol': symbol, f: date})
-            if r.deleted_count > 0: break
     return {"deleted": r.deleted_count}
 
 @app.delete("/api/delete-all-by-date")
-async def delete_all_by_date(collection: str = Query(...), date: str = Query(...)):
+async def api_delete_all(collection: str = Query(...), date: str = Query(...)):
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
     
     total = col.delete_many({'analysis_date': date}).deleted_count
     total += col.delete_many({'saved_at': {'$regex': f'^{date}'}}).deleted_count
-    for f in ['date', 'level_date', 'latest_date']:
-        total += col.delete_many({f: date}).deleted_count
     return {"deleted": total}
 
 @app.put("/api/update-trade")
-async def update_trade(symbol: str = Query(...), date: str = Query(...),
-                       entry_price: float = Query(None), stop_loss: float = Query(None),
-                       target_price: float = Query(None)):
+async def api_update_trade(symbol: str = Query(...), date: str = Query(...),
+                           entry_price: float = Query(None), stop_loss: float = Query(None),
+                           target_price: float = Query(None)):
     col = get_mongo_collection()
     if col is None: return JSONResponse({"error": "Not found"}, status_code=500)
     
@@ -354,7 +242,7 @@ async def update_trade(symbol: str = Query(...), date: str = Query(...),
     return {"updated": r.modified_count}
 
 # ================================
-# HTML Dashboard
+# HTML Dashboard  
 # ================================
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -449,9 +337,9 @@ async def dashboard():
         function loadAR(){const s=localStorage.getItem('ar_v22');if(s)try{ar=JSON.parse(s)}catch(e){ar=[]}updateAUI()}
         function saveAR(){localStorage.setItem('ar_v22',JSON.stringify(ar));updateAUI();renderCT()}
         function updateAUI(){const b=document.getElementById('abar'),btn=document.getElementById('abtn');if(ar.length>0){b.style.display='block';b.innerHTML='🔔 '+ar.map(r=>`${r.s} ${r.c==='above'?'>':'<'} ${r.t}`).join(' | ');btn.classList.add('active-alert');btn.textContent='🔔('+ar.length+')'}else{b.style.display='none';btn.classList.remove('active-alert');btn.textContent='🔔'}}
-        async function openAlertModal(){document.getElementById('amInfo').textContent='Symbols for: '+(document.getElementById('dateSelect').value||'all');document.getElementById('alertModal').classList.add('open');await loadAS();renderCA()}
+        async function openAlertModal(){document.getElementById('amInfo').textContent='Symbols for: '+(document.getElementById('dateSelect').value||'LATEST');document.getElementById('alertModal').classList.add('open');await loadAS();renderCA()}
         function closeAlertModal(){document.getElementById('alertModal').classList.remove('open')}
-        async function loadAS(){const d=document.getElementById('dateSelect').value,sel=document.getElementById('asel');sel.innerHTML='<option>Loading...</option>';try{let u=`/api/collection-symbols?collection=${M[ct]}`;if(d)u+=`&date=${d}`;const s=await(await fetch(u)).json();sel.innerHTML='<option value="">-- Select --</option>';if(Array.isArray(s)&&s.length>0){s.forEach(x=>{const o=document.createElement('option');o.value=x;o.textContent=x;sel.appendChild(o)})}else{sel.innerHTML='<option>No symbols</option>'}}catch(e){sel.innerHTML='<option>Error</option>'}}
+        async function loadAS(){const d=document.getElementById('dateSelect').value,sel=document.getElementById('asel');sel.innerHTML='<option>Loading...</option>';try{let u=`/api/collection-symbols?collection=${M[ct]}`;if(d)u+=`&date=${d}`;const s=await(await fetch(u)).json();sel.innerHTML='<option value="">-- Select --</option>';const uniq=[...new Set(s)];if(uniq.length>0){uniq.forEach(x=>{const o=document.createElement('option');o.value=x;o.textContent=x;sel.appendChild(o)})}else{sel.innerHTML='<option>No symbols</option>'}}catch(e){sel.innerHTML='<option>Error</option>'}}
         function renderCA(){const s=document.getElementById('acur'),l=document.getElementById('alist');if(ar.length===0){s.style.display='none';return}s.style.display='block';l.innerHTML=ar.map((r,i)=>`<div style="display:flex;justify-content:space-between;background:#1a1a2e;padding:8px;margin:5px 0;border-radius:5px;font-size:.8em"><span>🔔 ${r.s} ${r.c==='above'?'↑':'↓'} ${r.t}</span><button style="background:#ff4757;padding:5px 10px;font-size:.8em" onclick="removeAR(${i})">✕</button></div>`).join('')}
         function addAlert(){const s=document.getElementById('asel').value,c=document.getElementById('acond').value,t=parseFloat(document.getElementById('athr').value);if(!s||s.includes('--')){alert('Select symbol');return}if(!t){alert('Enter price');return}ar=ar.filter(r=>r.s!==s);ar.push({s,c,t});saveAR();renderCA();document.getElementById('asel').value='';document.getElementById('athr').value=''}
         function removeAR(i){ar.splice(i,1);saveAR();renderCA();renderCT()}
@@ -474,7 +362,7 @@ async def dashboard():
         function renderAI(){
             const div=document.getElementById('dynamicTable');
             if(!cd.length){div.innerHTML='<p style="color:#888;text-align:center;padding:40px">No data</p>';return}
-            let h='<table><thead><tr><th>#</th><th>Symbol</th><th>Date</th><th>Price</th><th>LTP</th><th>Sector</th><th>Signal</th><th>Score</th><th>LLM</th><th>LLM%</th><th>XGB</th><th>XGB%</th><th>PPO</th><th>Ag</th><th>E Acc</th><th>Entry</th><th>SL</th><th>TP</th><th>R:R</th><th>Act</th></tr></thead><tbody>';
+            let h='<table><thead><tr><th>#</th><th>Symbol</th><th>Date</th><th>Price</th><th>LTP</th><th>Signal</th><th>Score</th><th>Entry</th><th>SL</th><th>TP</th><th>Act</th></tr></thead><tbody>';
             cd.forEach((r,i)=>{
                 const id=(r.symbol||'').replace(/[^a-zA-Z0-9]/g,'_'),ie=er&&er.symbol===r.symbol;
                 const as=getAS(r.symbol),rc=as?'ltp-alert-row':'',ds=getDR(r);
@@ -482,7 +370,7 @@ async def dashboard():
                 const sc=ie?`<input class="editable-input" id="esl-${id}" value="${(r.stop_loss||0).toFixed(2)}">`:(r.stop_loss||0).toFixed(2);
                 const tc=ie?`<input class="editable-input" id="etp-${id}" value="${(r.target_price||0).toFixed(2)}">`:(r.target_price||0).toFixed(2);
                 const ac=ie?`<button class="save-btn" onclick="saveEdit('${r.symbol}','${ds}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>`:`<button class="edit-btn" onclick="startEdit('${r.symbol}','${ds}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}')">✏️</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${ds}')">🗑️</button>`;
-                h+=`<tr class="${rc}"><td>${i+1}</td><td><strong>${r.symbol}${as?' 🔔':''}</strong></td><td>${ds}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${getLD(r.symbol)}</td><td>${r.sector||''}</td><td class="${getSC(r.final_signal)}">${r.final_signal||''}</td><td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td><td>${r.llm_signal||''}</td><td>${(r.llm_confidence||0).toFixed(0)}%</td><td>${r.xgb_signal||''}</td><td>${(r.xgb_confidence||0).toFixed(0)}%</td><td>${r.ppo_signal||''}</td><td>${(r.agentic_score||0).toFixed(1)}</td><td>${(r.elliott_accuracy||0).toFixed(1)}%</td><td>${ec}</td><td>${sc}</td><td>${tc}</td><td>${r.risk_reward_ratio||0}</td><td>${ac}</td></tr>`;
+                h+=`<tr class="${rc}"><td>${i+1}</td><td><strong>${r.symbol}${as?' 🔔':''}</strong></td><td>${ds}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${getLD(r.symbol)}</td><td class="${getSC(r.final_signal)}">${r.final_signal||''}</td><td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td><td>${ec}</td><td>${sc}</td><td>${tc}</td><td>${ac}</td></tr>`;
             });
             div.innerHTML=h+'</tbody></table>';
             document.getElementById('recordCount').textContent=`(${cd.length})`;
@@ -491,15 +379,15 @@ async def dashboard():
         function renderSW(){
             const div=document.getElementById('dynamicTable');
             if(!cd.length){div.innerHTML='<p style="color:#888;text-align:center;padding:40px">No data</p>';return}
-            let h='<table><thead><tr><th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Score</th><th>W Div</th><th>W Score</th><th>Drop%</th><th>RSI Gain</th><th>D Div</th><th>🗑️</th></tr></thead><tbody>';
-            cd.forEach((r,i)=>{const as=getAS(r.symbol),ds=getDR(r);h+=`<tr class="${as?'ltp-alert-row':''}"><td>${i+1}</td><td><strong>${r.symbol||''}${as?' 🔔':''}</strong></td><td>${r.sector||''}</td><td>${getLD(r.symbol)}</td><td>${(r.composite_score||0).toFixed(0)}</td><td>${r.weekly_divergence||''}</td><td>${r.weekly_strength_score||0}</td><td>${(r.weekly_price_drop_pct||0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain||0).toFixed(2)}</td><td>${r.daily_divergence_type||''}</td><td><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${ds}')">🗑️</button></td></tr>`});
+            let h='<table><thead><tr><th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Score</th><th>W Div</th><th>Drop%</th><th>RSI Gain</th><th>🗑️</th></tr></thead><tbody>';
+            cd.forEach((r,i)=>{const as=getAS(r.symbol),ds=getDR(r);h+=`<tr class="${as?'ltp-alert-row':''}"><td>${i+1}</td><td><strong>${r.symbol||''}${as?' 🔔':''}</strong></td><td>${r.sector||''}</td><td>${getLD(r.symbol)}</td><td>${(r.composite_score||0).toFixed(0)}</td><td>${r.weekly_divergence||''}</td><td>${(r.weekly_price_drop_pct||0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain||0).toFixed(2)}</td><td><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${ds}')">🗑️</button></td></tr>`});
             div.innerHTML=h+'</tbody></table>';
             document.getElementById('recordCount').textContent=`(${cd.length})`;
         }
         
         function renderGen(){
             const div=document.getElementById('dynamicTable');
-            if(!cd.length){div.innerHTML='<p style="color:#888;text-align:center;padding:40px">No data for this date</p>';document.getElementById('recordCount').textContent='(0)';return}
+            if(!cd.length){div.innerHTML='<p style="color:#888;text-align:center;padding:40px">No data</p>';document.getElementById('recordCount').textContent='(0)';return}
             const ek=['_id','saved_at','analysis_datetime'];
             const keys=Object.keys(cd[0]).filter(k=>!ek.includes(k)&&!k.startsWith('_'));
             let h=`<table><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>🗑️</th></tr></thead><tbody>`;
@@ -515,6 +403,5 @@ async def dashboard():
 if __name__ == "__main__":
     import uvicorn
     PORT = int(os.environ.get("PORT", 8000))
-    print(f"🚀 Dashboard v22: http://localhost:{PORT}")
-    print(f"📅 S/R dates: http://localhost:{PORT}/api/dates?collection=support_resistance")
+    print(f"🚀 Dashboard v22 FINAL: http://localhost:{PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
