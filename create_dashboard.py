@@ -1,11 +1,8 @@
 """
-create_dashboard.py - v18 FINAL
-✅ FIXED: Use saved_at as primary date field for ALL tabs
-✅ FIXED: S/R uses saved_at date extraction
-✅ FIXED: Alert modal shows only selected date symbols
-✅ All Tabs with proper date filtering from saved_at
-✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
-✅ LTP Alert Modal with date-filtered symbol selector
+create_dashboard.py - v20 FINAL
+✅ ALL tabs use saved_at as PRIMARY date field
+✅ S/R, MACD, Daily Buy - all use saved_at
+✅ LTP Alert Modal with date-filtered symbols
 ✅ Delete All by Date + Edit buttons
 ✅ UptimeRobot HEAD endpoint
 """
@@ -24,7 +21,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="18.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="20.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -37,9 +34,6 @@ def get_mongo_collection(collection_name=None):
         print(f"MongoDB Connection Error: {e}")
         return None
 
-# ================================
-# Bangladesh Timezone Helper
-# ================================
 BD_TIMEZONE = timezone(timedelta(hours=6))
 
 def get_bd_time():
@@ -54,142 +48,71 @@ def is_dse_market_open():
              (hour == 14 and minute <= 20)))
 
 # ================================
-# DATE HELPERS - Extract date from saved_at or other fields
+# PRIMARY: Use saved_at for ALL collections
+# FALLBACK: other date fields
 # ================================
-def extract_date_string(value):
-    """Extract YYYY-MM-DD from any date format"""
-    if not value:
-        return None
-    
-    if isinstance(value, datetime):
-        return value.strftime('%Y-%m-%d')
-    
-    if isinstance(value, str):
-        value = value.strip()
-        # Already YYYY-MM-DD
-        if re.match(r'^\d{4}-\d{2}-\d{2}$', value):
-            return value
-        # ISO format: 2026-04-27T13:36:39.191723
-        if 'T' in value:
-            return value.split('T')[0]
-        # Other formats
-        match = re.search(r'(\d{4}-\d{2}-\d{2})', value)
-        if match:
-            return match.group(1)
-    
-    return None
+ALL_DATE_FIELDS = ['saved_at', 'analysis_date', 'date', 'level_date', 'latest_date', 'signal_date', 'p1_date', 'p2_date']
 
-def build_date_query_for_collection(date_value, collection_name):
-    """Build MongoDB query that checks saved_at (primary) + other date fields"""
-    conditions = []
-    
-    # PRIMARY: Check saved_at with regex (handles ISO format)
-    conditions.append({'saved_at': {'$regex': f'^{date_value}'}})
-    
-    # SECONDARY: Check other date fields
-    other_fields = ['analysis_date', 'date', 'level_date', 'latest_date', 'signal_date', 'p1_date', 'p2_date']
-    for field in other_fields:
+def build_date_query(date_value):
+    """Build query with saved_at as PRIMARY, others as fallback"""
+    conditions = [
+        {'saved_at': {'$regex': f'^{date_value}'}},  # PRIMARY
+    ]
+    # Fallback fields
+    for field in ['analysis_date', 'date', 'level_date', 'latest_date']:
         conditions.append({field: date_value})
         conditions.append({field: {'$regex': f'^{date_value}'}})
     
     return {'$or': conditions}
 
 def get_all_dates_from_collection(collection_name):
-    """Get all unique dates from saved_at field (primary) + other date fields"""
+    """Get unique dates from saved_at (YYYY-MM-DD extracted)"""
     col = get_mongo_collection(collection_name)
-    if col is None:
-        return []
+    if col is None: return []
     
     dates_set = set()
     
     try:
-        # Method 1: Use aggregation to extract date from saved_at
+        # PRIMARY: Extract date from saved_at
         pipeline = [
-            {
-                '$project': {
-                    'date_str': {'$substr': ['$saved_at', 0, 10]}
-                }
-            },
-            {
-                '$group': {
-                    '_id': '$date_str'
-                }
-            }
+            {'$match': {'saved_at': {'$exists': True}}},
+            {'$project': {'date_str': {'$substr': ['$saved_at', 0, 10]}}},
+            {'$group': {'_id': '$date_str'}}
         ]
-        try:
-            results = list(col.aggregate(pipeline))
-            for r in results:
-                if r['_id'] and re.match(r'^\d{4}-\d{2}-\d{2}', str(r['_id'])):
-                    dates_set.add(str(r['_id']))
-        except:
-            pass
-        
-        # Method 2: Check distinct saved_at (as string prefix matching)
-        try:
-            samples = list(col.find({'saved_at': {'$exists': True}}, {'saved_at': 1}).limit(1000))
-            for s in samples:
-                date_str = extract_date_string(s.get('saved_at'))
-                if date_str:
-                    dates_set.add(date_str)
-        except:
-            pass
-        
-        # Method 3: Check other date fields
-        other_fields = ['analysis_date', 'date', 'level_date', 'latest_date', 'signal_date']
-        for field in other_fields:
-            try:
-                field_dates = col.distinct(field)
-                for d in field_dates:
-                    date_str = extract_date_string(d)
-                    if date_str:
-                        dates_set.add(date_str)
-            except:
-                pass
-        
-        all_dates = sorted(list(dates_set), reverse=True)
-        print(f"📅 {collection_name}: Found {len(all_dates)} dates (from saved_at + other fields)")
-        return all_dates
-        
-    except Exception as e:
-        print(f"❌ Error getting dates for {collection_name}: {e}")
-        return []
-
-def get_symbols_for_date(collection_name, date_value):
-    """Get symbols from a collection for a specific date (using saved_at)"""
-    col = get_mongo_collection(collection_name)
-    if col is None:
-        return []
+        results = list(col.aggregate(pipeline))
+        for r in results:
+            if r['_id'] and re.match(r'^\d{4}-\d{2}-\d{2}', str(r['_id'])):
+                dates_set.add(str(r['_id']))
+    except:
+        pass
     
+    # Fallback: Check other fields
     try:
-        query = build_date_query_for_collection(date_value, collection_name)
-        symbols = col.distinct('symbol', query)
-        symbols = [s for s in symbols if s]
-        result = sorted(symbols)
-        print(f"📋 {collection_name}: {len(result)} symbols for date={date_value}")
-        return result
-    except Exception as e:
-        print(f"❌ Error getting symbols: {e}")
-        return []
+        for field in ['analysis_date', 'date', 'level_date', 'latest_date']:
+            try:
+                for d in col.distinct(field):
+                    if d and isinstance(d, str) and re.match(r'^\d{4}-\d{2}-\d{2}', d.strip()):
+                        dates_set.add(d.strip())
+            except: pass
+    except: pass
+    
+    all_dates = sorted(list(dates_set), reverse=True)
+    print(f"📅 {collection_name}: Found {len(all_dates)} dates")
+    if all_dates:
+        print(f"   Sample: {all_dates[:3]}")
+    return all_dates
 
 # ================================
 # API Routes
 # ================================
 @app.api_route("/head", methods=["GET", "HEAD"])
 async def uptime_robot_head():
-    return Response(content="OK", status_code=200, headers={"Cache-Control": "no-cache", "X-Health-Status": "healthy"})
+    return Response(content="OK", status_code=200, headers={"Cache-Control": "no-cache"})
 
 @app.get("/api/health")
 async def health():
     col = get_mongo_collection()
-    swrsi_col = get_mongo_collection("swrsi_signals") if MONGODB_URI else None
-    swrsi_count = swrsi_col.count_documents({}) if swrsi_col else 0
-    return {
-        "status": "ok", 
-        "mongodb": "connected" if col else "not configured",
-        "swrsi_signals": swrsi_count,
-        "dse_market": "OPEN" if is_dse_market_open() else "CLOSED",
-        "bangladesh_time": get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
-    }
+    return {"status": "ok", "mongodb": "connected" if col else "not configured"}
 
 @app.get("/api/market-status")
 async def market_status():
@@ -198,14 +121,11 @@ async def market_status():
     close_time = now.replace(hour=14, minute=20, second=0, microsecond=0)
     time_to_close = (close_time - now).total_seconds()
     alert_10min = is_open and (0 < time_to_close <= 600)
-
     if not is_open:
         weekday = now.weekday()
-        if weekday in [3, 4, 5]: next_open = "Sunday 10:00 AM"
-        else: next_open = "Tomorrow 10:00 AM"
+        next_open = "Sunday 10:00 AM" if weekday in [3, 4, 5] else "Tomorrow 10:00 AM"
     else:
         next_open = None
-
     return {
         "is_open": is_open,
         "alert_10min": alert_10min,
@@ -216,15 +136,14 @@ async def market_status():
 
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
-    now = get_bd_time()
     if not is_dse_market_open():
         return {"status": "closed", "message": "DSE Closed"}
     try:
         response = requests.get("https://www.dsebd.org/dseX_share.php", 
                                headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
         soup = BeautifulSoup(response.content, 'html.parser')
-        table = soup.find('table')
         ltp_data = {}
+        table = soup.find('table')
         if table:
             for row in table.find_all('tr')[1:]:
                 cols = row.find_all('td')
@@ -239,37 +158,45 @@ async def get_dse_ltp():
 
 @app.get("/api/dates")
 async def get_dates(collection: str = Query("daily_ai_signals")):
-    """Get all unique dates from saved_at field (extracted YYYY-MM-DD)"""
+    """Get unique dates from saved_at (extracted YYYY-MM-DD)"""
     dates = get_all_dates_from_collection(collection)
+    print(f"📅 API /dates?collection={collection} -> {len(dates)} dates")
     return dates
 
 @app.get("/api/collection-symbols")
 async def get_collection_symbols(collection: str = Query(...), date: str = Query(None)):
-    """Get symbols from a collection, filtered by date (via saved_at)"""
-    if not date:
-        col = get_mongo_collection(collection)
-        if col:
-            symbols = col.distinct('symbol')
-            return sorted([s for s in symbols if s])
-        return []
+    """Get symbols filtered by date (via saved_at)"""
+    col = get_mongo_collection(collection)
+    if col is None:
+        return JSONResponse({"error": f"Collection {collection} not found"}, status_code=500)
     
-    return get_symbols_for_date(collection, date)
+    try:
+        if date:
+            query = build_date_query(date)
+            symbols = col.distinct('symbol', query)
+        else:
+            symbols = col.distinct('symbol')
+        
+        result = sorted([s for s in symbols if s])
+        print(f"📋 {collection}: {len(result)} symbols for date={date}")
+        return result
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return []
 
 @app.get("/api/signals")
-async def get_signals(date: str = Query(None), signal: str = Query(None), symbol: str = Query(None), min_score: float = Query(0), limit: int = Query(1000)):
+async def get_signals(date: str = Query(None), signal: str = Query(None), symbol: str = Query(None), 
+                      min_score: float = Query(0), limit: int = Query(1000)):
     collection = get_mongo_collection()
     if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     
     query = {}
     if date:
-        query['$or'] = [
-            {'saved_at': {'$regex': f'^{date}'}},
-            {'analysis_date': date}
-        ]
+        query = build_date_query(date)
     else:
         latest = list(collection.find({'saved_at': {'$exists': True}}).sort('saved_at', -1).limit(1))
         if latest and latest[0].get('saved_at'):
-            date_str = extract_date_string(latest[0]['saved_at'])
+            date_str = latest[0]['saved_at'][:10] if isinstance(latest[0]['saved_at'], str) else ''
             if date_str:
                 query['saved_at'] = {'$regex': f'^{date_str}'}
     
@@ -277,9 +204,8 @@ async def get_signals(date: str = Query(None), signal: str = Query(None), symbol
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
     if min_score > 0: query['final_combined_score'] = {'$gte': min_score}
     
-    cursor = collection.find(query, {'_id': 0}).sort('final_combined_score', -1).limit(limit)
-    data = list(cursor)
-    print(f"🔍 AI Signals: date={date}, found {len(data)} records")
+    data = list(collection.find(query, {'_id': 0}).sort('final_combined_score', -1).limit(limit))
+    print(f"🔍 AI Signals: date={date}, found {len(data)}")
     return {"data": data}
 
 @app.get("/api/swrsi")
@@ -289,26 +215,23 @@ async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
     
     query = {}
     if date:
-        query['$or'] = [
-            {'saved_at': {'$regex': f'^{date}'}},
-            {'analysis_date': date}
-        ]
+        query = build_date_query(date)
     else:
         latest = list(col.find({'saved_at': {'$exists': True}}).sort('saved_at', -1).limit(1))
         if latest and latest[0].get('saved_at'):
-            date_str = extract_date_string(latest[0]['saved_at'])
+            date_str = latest[0]['saved_at'][:10] if isinstance(latest[0]['saved_at'], str) else ''
             if date_str:
                 query['saved_at'] = {'$regex': f'^{date_str}'}
     
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    
     data = list(col.find(query, {'_id': 0}).sort('composite_score', -1))
-    print(f"🔍 SWRSI: date={date}, found {len(data)} records")
+    print(f"🔍 SWRSI: date={date}, found {len(data)}")
     return {"signals": data, "total_signals": len(data)}
 
 @app.get("/api/generic-data")
-async def get_generic_data(collection: str = Query(...), date: str = Query(None), symbol: str = Query(None), limit: int = Query(500)):
-    """Get data from generic collections - PRIMARY: saved_at regex match"""
+async def get_generic_data(collection: str = Query(...), date: str = Query(None), 
+                           symbol: str = Query(None), limit: int = Query(500)):
+    """ALL collections use saved_at PRIMARY"""
     col = get_mongo_collection(collection)
     if col is None: 
         return JSONResponse({"error": f"Collection {collection} not found"}, status_code=500)
@@ -316,18 +239,25 @@ async def get_generic_data(collection: str = Query(...), date: str = Query(None)
     query = {}
     
     if date:
-        query = build_date_query_for_collection(date, collection)
-        print(f"🔍 {collection}: date={date}")
+        query = build_date_query(date)
+        print(f"🔍 {collection}: date={date} -> using saved_at regex")
     
     if symbol: 
         query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
     
     try:
         data = list(col.find(query, {'_id': 0}).limit(limit))
-        print(f"📊 {collection}: found {len(data)} records for date={date}")
+        print(f"📊 {collection}: found {len(data)} records")
+        
+        if len(data) == 0 and date:
+            # Debug: show what's in saved_at
+            sample = list(col.find({}, {'saved_at': 1, 'symbol': 1}).limit(3))
+            if sample:
+                print(f"   Sample saved_at values: {[s.get('saved_at') for s in sample]}")
+        
         return {"data": data}
     except Exception as e:
-        print(f"❌ Error in generic-data: {e}")
+        print(f"❌ Error: {e}")
         return {"data": [], "error": str(e)}
 
 @app.delete("/api/delete-signal")
@@ -335,38 +265,38 @@ async def delete_signal(collection: str = Query("daily_ai_signals"), symbol: str
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     
-    # Try multiple ways to match
+    # Primary: saved_at regex
     result = col.delete_one({'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}})
-    if result.deleted_count == 0:
-        result = col.delete_one({'symbol': symbol, 'analysis_date': date})
-    if result.deleted_count == 0:
-        result = col.delete_one({'symbol': symbol, 'date': date})
-    if result.deleted_count == 0:
-        result = col.delete_one({'symbol': symbol, 'level_date': date})
+    if result.deleted_count > 0: return {"deleted": result.deleted_count}
     
-    return {"deleted": result.deleted_count}
+    # Fallback
+    for field in ['analysis_date', 'date', 'level_date']:
+        result = col.delete_one({'symbol': symbol, field: date})
+        if result.deleted_count > 0: return {"deleted": result.deleted_count}
+    
+    return {"deleted": 0}
 
 @app.delete("/api/delete-all-by-date")
 async def delete_all_by_date(collection: str = Query(...), date: str = Query(...)):
-    """Delete all records matching a date (via saved_at regex)"""
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     
     total = 0
-    
-    # Primary: saved_at regex
+    # Primary: saved_at
     result = col.delete_many({'saved_at': {'$regex': f'^{date}'}})
     total += result.deleted_count
     
-    # Secondary: other date fields
+    # Fallback
     for field in ['analysis_date', 'date', 'level_date', 'latest_date']:
-        r = col.delete_many({field: date})
-        total += r.deleted_count
+        total += col.delete_many({field: date}).deleted_count
     
+    print(f"🗑️ Deleted {total} records from {collection} for date={date}")
     return {"deleted": total, "collection": collection, "date": date}
 
 @app.put("/api/update-trade")
-async def update_trade(symbol: str = Query(...), date: str = Query(...), entry_price: float = Query(None), stop_loss: float = Query(None), target_price: float = Query(None)):
+async def update_trade(symbol: str = Query(...), date: str = Query(...), 
+                       entry_price: float = Query(None), stop_loss: float = Query(None), 
+                       target_price: float = Query(None)):
     collection = get_mongo_collection()
     if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     update_fields = {'edited': True, 'edited_at': datetime.now().isoformat()}
@@ -377,7 +307,7 @@ async def update_trade(symbol: str = Query(...), date: str = Query(...), entry_p
     return {"updated": result.modified_count}
 
 # ================================
-# HTML Dashboard (same UI, updated API calls)
+# HTML Dashboard
 # ================================
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -386,7 +316,7 @@ async def dashboard():
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>🤖 AI Trading Signals Dashboard v18</title>
+    <title>🤖 AI Trading Signals Dashboard v20</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Segoe UI', sans-serif; background: #0a0a0f; color: #e0e0e0; padding: 20px; }
@@ -410,7 +340,7 @@ async def dashboard():
         .alert-config-btn.active-alert { animation: alertPulse 1s infinite; }
         @keyframes alertPulse { 0%,100% { box-shadow: 0 0 5px #ffa500; } 50% { box-shadow: 0 0 20px #ffa500; } }
         table { width: 100%; border-collapse: collapse; font-size: 0.65em; background: #111122; border-radius: 10px; overflow: hidden; border: 1px solid #222; }
-        th { background: #1a1a2e; padding: 8px 4px; color: #00d4ff; white-space: nowrap; font-size: 0.9em; position: sticky; top: 0; z-index: 10; }
+        th { background: #1a1a2e; padding: 8px 4px; color: #00d4ff; white-space: nowrap; font-size: 0.9em; }
         td { padding: 4px; border-bottom: 1px solid #222; white-space: nowrap; }
         tr:hover { background: #1a1a2e40; }
         .edit-btn { background: #ffa500; color: #000; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 0.7em; margin: 1px; }
@@ -443,14 +373,14 @@ async def dashboard():
         .alert-item { display: flex; justify-content: space-between; align-items: center; background: #1a1a2e; padding: 8px; margin: 5px 0; border-radius: 5px; font-size: 0.8em; }
         .alert-item span { color: #ffa500; }
         .info-text { font-size: 0.75em; color: #888; text-align: center; margin-top: 5px; }
-        .debug-info { font-size: 0.7em; color: #666; margin-top: 10px; padding: 8px; background: #111; border-radius: 5px; white-space: pre-wrap; }
+        .debug-info { font-size: 0.7em; color: #666; margin-top: 10px; padding: 8px; background: #111; border-radius: 5px; }
         @media (max-width: 768px) { .header h1 { font-size: 1.3em; } .controls { flex-direction: column; } }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🤖 AI Trading Signals Dashboard v18</h1>
-        <p id="marketStatus" style="font-size:0.85em;margin-top:5px;">Checking DSE status...</p>
+        <h1>🤖 AI Trading Signals Dashboard v20</h1>
+        <p id="marketStatus">Checking DSE status...</p>
     </div>
     <div id="alertBox" class="alert-box">⚠️ DSE CLOSING IN 10 MINUTES!</div>
     
@@ -464,7 +394,7 @@ async def dashboard():
     </div>
     
     <div class="controls">
-        <label>📅 Date:</label>
+        <label>📅 Date (saved_at):</label>
         <select id="dateSelect" onchange="onDateChange()"><option value="">Latest</option></select>
         <label>🔍 Symbol:</label>
         <input type="text" id="symbolSearch" onkeyup="loadCurrentTab()" style="width:100px;" placeholder="Filter...">
@@ -477,11 +407,11 @@ async def dashboard():
     <div id="alertModal" class="modal">
         <div class="modal-content">
             <h3>🔔 LTP Alert Configuration</h3>
-            <p class="info-text" id="alertModalInfo">Select symbol from current date</p>
+            <p class="info-text" id="alertModalInfo">Symbols filtered by saved_at date</p>
             <label>📋 Symbol:</label>
             <select id="alertSymbolSelect"><option value="">-- Select date first --</option></select>
             <label>📊 Condition:</label>
-            <select id="alertCondition"><option value="above">LTP উপরে গেলে Alert (Above)</option><option value="below">LTP নিচে গেলে Alert (Below)</option></select>
+            <select id="alertCondition"><option value="above">LTP উপরে গেলে Alert</option><option value="below">LTP নিচে গেলে Alert</option></select>
             <label>💰 Threshold Price:</label>
             <input type="number" id="alertThresholdPrice" placeholder="Enter price..." step="0.01">
             <div class="modal-buttons">
@@ -507,32 +437,28 @@ async def dashboard():
         let alertRules = [];
         const COLLECTION_MAP = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
 
-        loadDates(COLLECTION_MAP[currentTab]);
-        loadCurrentTab();
-        checkMarketStatus();
-        loadDseLtp();
-        loadAlertRules();
+        loadDates(COLLECTION_MAP[currentTab]); loadCurrentTab(); checkMarketStatus(); loadDseLtp(); loadAlertRules();
         setInterval(checkMarketStatus, 60000);
         setInterval(async () => { const s = await (await fetch('/api/market-status')).json(); if (s.is_open) loadDseLtp(); }, 60000);
         setInterval(loadDseLtp, 300000);
 
         function loadAlertRules() {
-            const saved = localStorage.getItem('ltpAlertRules_v18');
-            if (saved) { try { alertRules = JSON.parse(saved); } catch(e) { alertRules = []; } }
+            const s = localStorage.getItem('ltpAlertRules_v20');
+            if (s) { try { alertRules = JSON.parse(s); } catch(e) { alertRules = []; } }
             updateAlertUI();
         }
-        function saveAlertRules() { localStorage.setItem('ltpAlertRules_v18', JSON.stringify(alertRules)); updateAlertUI(); renderCurrentTab(); }
+        function saveAlertRules() { localStorage.setItem('ltpAlertRules_v20', JSON.stringify(alertRules)); updateAlertUI(); renderCurrentTab(); }
         function updateAlertUI() {
             const bar = document.getElementById('alertStatusBar'), btn = document.getElementById('alertConfigBtn');
             if (alertRules.length > 0) {
                 bar.style.display = 'block';
                 bar.innerHTML = `🔔 <strong>${alertRules.length} Alert(s):</strong> ` + alertRules.map(r => `${r.symbol} ${r.condition==='above'?'↑>':'↓<'} ${r.threshold}`).join(' | ');
-                btn.classList.add('active-alert'); btn.textContent = `🔔 Alerts (${alertRules.length})`;
+                btn.classList.add('active-alert'); btn.textContent = `🔔 (${alertRules.length})`;
             } else { bar.style.display = 'none'; btn.classList.remove('active-alert'); btn.textContent = '🔔 Alerts'; }
         }
         async function openAlertModal() {
             const date = document.getElementById('dateSelect').value;
-            document.getElementById('alertModalInfo').textContent = date ? `Symbols for: ${date}` : 'Select a date first';
+            document.getElementById('alertModalInfo').textContent = date ? `Symbols for saved_at date: ${date}` : 'Select date to filter symbols';
             document.getElementById('alertModal').classList.add('open');
             await loadAlertSymbols(); renderCurrentAlerts();
         }
@@ -550,7 +476,8 @@ async def dashboard():
                     symbols.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; select.appendChild(o); });
                     document.getElementById('alertModalInfo').textContent = `${symbols.length} symbols for ${date || 'all dates'}`;
                 } else {
-                    select.innerHTML = '<option value="">No symbols found</option>';
+                    select.innerHTML = '<option value="">No symbols for this date</option>';
+                    document.getElementById('alertModalInfo').textContent = `No symbols found for ${date}`;
                 }
             } catch(e) { select.innerHTML = '<option value="">Error</option>'; }
         }
@@ -592,11 +519,11 @@ async def dashboard():
         async function loadDates(collection) {
             try {
                 const dates = await (await fetch(`/api/dates?collection=${encodeURIComponent(collection)}`)).json();
-                const select = document.getElementById('dateSelect'), currentValue = select.value;
+                const select = document.getElementById('dateSelect'), cv = select.value;
                 select.innerHTML = '<option value="">Latest</option>';
                 if (Array.isArray(dates)) dates.forEach(d => { if (d) { const o = document.createElement('option'); o.value = d; o.textContent = d; select.appendChild(o); } });
-                if (currentValue && Array.from(select.options).some(o => o.value === currentValue)) select.value = currentValue;
-                document.getElementById('debugInfo').textContent = `📅 ${collection}: ${dates.length} dates`;
+                if (cv && Array.from(select.options).some(o => o.value === cv)) select.value = cv;
+                document.getElementById('debugInfo').textContent = `📅 ${collection}: ${dates.length} dates | Current: ${currentTab}`;
             } catch(e) { document.getElementById('debugInfo').textContent = `Error: ${e.message}`; }
         }
         function onDateChange() { loadCurrentTab(); }
@@ -637,6 +564,10 @@ async def dashboard():
             else if (alertStatus === 'below') { cls = 'ltp-below'; arrow = ' ↓'; }
             return `<span class="${cls}" style="font-weight:bold;">${ltp.toFixed(2)}${arrow}</span>`;
         }
+        function getDateFromRecord(r) {
+            if (r.saved_at && typeof r.saved_at === 'string') return r.saved_at.substring(0, 10);
+            return r.analysis_date || r.date || r.level_date || r.latest_date || '';
+        }
         function startEdit(s,d,e,sl,tp,i) { editingRow={symbol:s,date:d,index:i}; renderCurrentTab(); }
         function cancelEdit() { editingRow=null; renderCurrentTab(); }
         async function saveEdit(symbol, date) {
@@ -655,9 +586,9 @@ async def dashboard():
             const j = await (await fetch(`/api/delete-all-by-date?collection=${col}&date=${date}`,{method:'DELETE'})).json();
             alert(`Deleted ${j.deleted} records`); loadDates(col); loadCurrentTab();
         }
-        async function deleteRecord(symbol, date, tab) {
+        async function deleteRecord(symbol, date) {
             if (!confirm(`Delete ${symbol}?`)) return;
-            await fetch(`/api/delete-signal?collection=${COLLECTION_MAP[tab]||COLLECTION_MAP[currentTab]}&symbol=${symbol}&date=${date}`,{method:'DELETE'});
+            await fetch(`/api/delete-signal?collection=${COLLECTION_MAP[currentTab]}&symbol=${symbol}&date=${date}`,{method:'DELETE'});
             loadCurrentTab();
         }
         function renderAITable() {
@@ -667,11 +598,12 @@ async def dashboard():
             currentData.forEach((r,i) => {
                 const safeId = (r.symbol||'').replace(/[^a-zA-Z0-9]/g,'_'), isEdit = editingRow && editingRow.symbol === r.symbol;
                 const alertStatus = getLtpAlertStatus(r.symbol), rowClass = alertStatus ? 'ltp-alert-row' : '';
+                const dateStr = getDateFromRecord(r);
                 const ec = isEdit ? `<input class="editable-input" id="edit-entry-${safeId}" value="${(r.entry_price||0).toFixed(2)}">` : (r.entry_price||0).toFixed(2);
                 const sc = isEdit ? `<input class="editable-input" id="edit-sl-${safeId}" value="${(r.stop_loss||0).toFixed(2)}">` : (r.stop_loss||0).toFixed(2);
                 const tc = isEdit ? `<input class="editable-input" id="edit-tp-${safeId}" value="${(r.target_price||0).toFixed(2)}">` : (r.target_price||0).toFixed(2);
-                const ac = isEdit ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date||extractDate(r.saved_at)}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>` : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date||''}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date||(r.saved_at||'').substring(0,10)}','ai_signals')">🗑️</button>`;
-                h += `<tr class="${rowClass}"><td>${i+1}</td><td><strong>${r.symbol}${r.edited?'<span class="edited-badge">✏️</span>':''}${alertStatus?' 🔔':''}</strong></td><td>${r.analysis_date||(r.saved_at||'').substring(0,10)}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${getLtpDisplay(r.symbol)}</td><td>${r.sector||''}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td><td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td><td>${r.llm_signal||''}</td><td>${(r.llm_confidence||0).toFixed(0)}%</td><td>${r.llm_strength||''}</td><td>${r.llm_bias||''}</td><td>${r.llm_available?'✅':'❌'}</td><td>${r.xgb_signal||''}</td><td>${(r.xgb_confidence||0).toFixed(0)}%</td><td>${(r.xgb_prob_up||0).toFixed(3)}</td><td>${(r.xgb_auc||0).toFixed(3)}</td><td>${r.xgb_available?'✅':'❌'}</td><td>${r.ppo_signal||''}</td><td>${(r.ppo_confidence||0).toFixed(0)}%</td><td>${r.ppo_available?'✅':'❌'}</td><td>${r.ppo_weight||0}</td><td>${(r.agentic_score||0).toFixed(1)}</td><td>${r.agentic_bias||''}</td><td>${r.agentic_available?'✅':'❌'}</td><td>${(r.elliott_accuracy||0).toFixed(1)}%</td><td>${r.elliott_total_predictions||0}</td><td style="font-size:0.6em;">${(r.elliott_wave_count||'').substring(0,12)}</td><td style="font-size:0.6em;">${(r.elliott_sub_waves||'').substring(0,15)}</td><td>${r.elliott_current_wave||''}</td><td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td><td>${r.elliott_is_bullish?'✅':'❌'}</td><td>${r.elliott_wave_position||''}</td><td>${ec}</td><td>${sc}</td><td>${tc}</td><td>${r.risk_reward_ratio||0}</td><td>${ac}</td></tr>`;
+                const ac = isEdit ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${dateStr}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>` : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${dateStr}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${dateStr}')">🗑️</button>`;
+                h += `<tr class="${rowClass}"><td>${i+1}</td><td><strong>${r.symbol}${r.edited?'<span class="edited-badge">✏️</span>':''}${alertStatus?' 🔔':''}</strong></td><td>${dateStr}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${getLtpDisplay(r.symbol)}</td><td>${r.sector||''}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td><td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td><td>${r.llm_signal||''}</td><td>${(r.llm_confidence||0).toFixed(0)}%</td><td>${r.llm_strength||''}</td><td>${r.llm_bias||''}</td><td>${r.llm_available?'✅':'❌'}</td><td>${r.xgb_signal||''}</td><td>${(r.xgb_confidence||0).toFixed(0)}%</td><td>${(r.xgb_prob_up||0).toFixed(3)}</td><td>${(r.xgb_auc||0).toFixed(3)}</td><td>${r.xgb_available?'✅':'❌'}</td><td>${r.ppo_signal||''}</td><td>${(r.ppo_confidence||0).toFixed(0)}%</td><td>${r.ppo_available?'✅':'❌'}</td><td>${r.ppo_weight||0}</td><td>${(r.agentic_score||0).toFixed(1)}</td><td>${r.agentic_bias||''}</td><td>${r.agentic_available?'✅':'❌'}</td><td>${(r.elliott_accuracy||0).toFixed(1)}%</td><td>${r.elliott_total_predictions||0}</td><td style="font-size:0.6em;">${(r.elliott_wave_count||'').substring(0,12)}</td><td style="font-size:0.6em;">${(r.elliott_sub_waves||'').substring(0,15)}</td><td>${r.elliott_current_wave||''}</td><td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td><td>${r.elliott_is_bullish?'✅':'❌'}</td><td>${r.elliott_wave_position||''}</td><td>${ec}</td><td>${sc}</td><td>${tc}</td><td>${r.risk_reward_ratio||0}</td><td>${ac}</td></tr>`;
             });
             div.innerHTML = h + '</tbody></table>';
             document.getElementById('recordCount').textContent = `(${currentData.length})`;
@@ -680,7 +612,7 @@ async def dashboard():
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML='<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
             let h = `<table><thead><tr><th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Score</th><th>W Div</th><th>W Label</th><th>W Score</th><th>Prev Low</th><th>Curr Low</th><th>Prev RSI</th><th>Curr RSI</th><th>Drop%</th><th>RSI Gain</th><th>Prev Wk</th><th>Curr Wk</th><th>D Div</th><th>D Str</th><th>D Last RSI</th><th>D Prev RSI</th><th>🗑️</th></tr></thead><tbody>`;
-            currentData.forEach((r,i) => { const alertStatus = getLtpAlertStatus(r.symbol); const dateStr = (r.saved_at||'').substring(0,10); h += `<tr class="${alertStatus?'ltp-alert-row':''}"><td>${i+1}</td><td><strong>${r.symbol||''}${alertStatus?' 🔔':''}</strong></td><td>${r.sector||''}</td><td>${getLtpDisplay(r.symbol)}</td><td>${(r.composite_score||0).toFixed(0)}</td><td>${r.weekly_divergence||''}</td><td>${r.weekly_strength_label||''}</td><td>${r.weekly_strength_score||0}</td><td>${(r.weekly_prev_low||0).toFixed(2)}</td><td>${(r.weekly_curr_low||0).toFixed(2)}</td><td>${(r.weekly_prev_rsi||0).toFixed(2)}</td><td>${(r.weekly_curr_rsi||0).toFixed(2)}</td><td>${(r.weekly_price_drop_pct||0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain||0).toFixed(2)}</td><td>${r.weekly_prev_date||''}</td><td>${r.weekly_curr_date||''}</td><td>${r.daily_divergence_type||''}</td><td>${r.daily_divergence_strength||''}</td><td>${(r.daily_last_rsi||0).toFixed(2)}</td><td>${(r.daily_prev_rsi||0).toFixed(2)}</td><td><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${dateStr}','swrsi')">🗑️</button></td></tr>`; });
+            currentData.forEach((r,i) => { const alertStatus = getLtpAlertStatus(r.symbol); const dateStr = getDateFromRecord(r); h += `<tr class="${alertStatus?'ltp-alert-row':''}"><td>${i+1}</td><td><strong>${r.symbol||''}${alertStatus?' 🔔':''}</strong></td><td>${r.sector||''}</td><td>${getLtpDisplay(r.symbol)}</td><td>${(r.composite_score||0).toFixed(0)}</td><td>${r.weekly_divergence||''}</td><td>${r.weekly_strength_label||''}</td><td>${r.weekly_strength_score||0}</td><td>${(r.weekly_prev_low||0).toFixed(2)}</td><td>${(r.weekly_curr_low||0).toFixed(2)}</td><td>${(r.weekly_prev_rsi||0).toFixed(2)}</td><td>${(r.weekly_curr_rsi||0).toFixed(2)}</td><td>${(r.weekly_price_drop_pct||0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain||0).toFixed(2)}</td><td>${r.weekly_prev_date||''}</td><td>${r.weekly_curr_date||''}</td><td>${r.daily_divergence_type||''}</td><td>${r.daily_divergence_strength||''}</td><td>${(r.daily_last_rsi||0).toFixed(2)}</td><td>${(r.daily_prev_rsi||0).toFixed(2)}</td><td><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${dateStr}')">🗑️</button></td></tr>`; });
             div.innerHTML = h + '</tbody></table>';
             document.getElementById('recordCount').textContent = `(${currentData.length})`;
         }
@@ -690,7 +622,7 @@ async def dashboard():
             const excludeKeys = ['_id', 'saved_at'];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             let h = `<table><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>${keys.map(k=>`<th>${k}</th>`).join('')}<th>🗑️</th></tr></thead><tbody>`;
-            currentData.forEach((r,i) => { const alertStatus = getLtpAlertStatus(r.symbol); const rowClass = alertStatus?'ltp-alert-row':''; const dateStr = r.analysis_date || r.date || r.level_date || (r.saved_at||'').substring(0,10) || ''; h += `<tr class="${rowClass}"><td>${i+1}</td><td><strong>${r.symbol||''}${alertStatus?' 🔔':''}</strong></td><td>${getLtpDisplay(r.symbol)}</td>${keys.map(k=>`<td>${r[k]??''}</td>`).join('')}<td><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${dateStr}','${currentTab}')">🗑️</button></td></tr>`; });
+            currentData.forEach((r,i) => { const alertStatus = getLtpAlertStatus(r.symbol); const rowClass = alertStatus?'ltp-alert-row':''; const dateStr = getDateFromRecord(r); h += `<tr class="${rowClass}"><td>${i+1}</td><td><strong>${r.symbol||''}${alertStatus?' 🔔':''}</strong></td><td>${getLtpDisplay(r.symbol)}</td>${keys.map(k=>`<td>${r[k]??''}</td>`).join('')}<td><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${dateStr}')">🗑️</button></td></tr>`; });
             div.innerHTML = h + '</tbody></table>';
             document.getElementById('recordCount').textContent = `(${currentData.length})`;
         }
@@ -702,7 +634,7 @@ async def dashboard():
 if __name__ == "__main__":
     import uvicorn
     PORT = int(os.environ.get("PORT", 8000))
-    print(f"🚀 Dashboard v18: http://localhost:{PORT}")
-    print(f"💚 Health: http://localhost:{PORT}/head")
-    print(f"📅 Test: http://localhost:{PORT}/api/dates?collection=support_resistance")
+    print(f"🚀 Dashboard v20: http://localhost:{PORT}")
+    print(f"📅 S/R dates: http://localhost:{PORT}/api/dates?collection=support_resistance")
+    print(f"📅 MACD dates: http://localhost:{PORT}/api/dates?collection=macd_signals")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
