@@ -5,6 +5,8 @@ create_dashboard.py
 ✅ AI Signals (37 cols) + SWRSI + S/R + MACD + EMA 200 + Daily Buy
 ✅ S/R date selector FIXED (uses analysis_date like all other tabs)
 ✅ LTP Alert Modal + Delete All + Edit buttons
+✅ Trade Management Modal with Entry/SL/TP/Exposure/Risk%
+✅ Auto-calculated RRR column in all tabs
 ✅ UptimeRobot HEAD endpoint
 """
 
@@ -22,7 +24,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="12.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="13.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -170,6 +172,7 @@ async def get_dse_ltp():
     except Exception as e:
         print(f"LTP ফেচিং এরর: {e}")
         return {"status": "error", "message": str(e)}
+
 # ================================
 # FIXED: ALL collections use analysis_date
 # ================================
@@ -330,15 +333,51 @@ async def delete_all_by_date(collection: str = Query(...), date: str = Query(...
     return {"deleted": total, "collection": collection, "date": date}
 
 @app.put("/api/update-trade")
-async def update_trade(symbol: str = Query(...), date: str = Query(...), entry_price: float = Query(None), stop_loss: float = Query(None), target_price: float = Query(None)):
-    collection = get_mongo_collection()
-    if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-    update_fields = {'edited': True, 'edited_at': datetime.now().isoformat()}
+async def update_trade(
+    collection: str = Query("daily_ai_signals"),
+    symbol: str = Query(...), 
+    date: str = Query(...), 
+    entry_price: float = Query(None), 
+    stop_loss: float = Query(None), 
+    target_price: float = Query(None),
+    total_exposure: float = Query(None),
+    risk_percent: float = Query(None)
+):
+    col = get_mongo_collection(collection)
+    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    
+    update_fields = {
+        'edited': True, 
+        'edited_at': datetime.now().isoformat()
+    }
+    
     if entry_price is not None: update_fields['entry_price'] = entry_price
     if stop_loss is not None: update_fields['stop_loss'] = stop_loss
     if target_price is not None: update_fields['target_price'] = target_price
-    result = collection.update_one({'symbol': symbol, 'analysis_date': date}, {'$set': update_fields})
-    return {"updated": result.modified_count}
+    if total_exposure is not None: update_fields['total_exposure'] = total_exposure
+    if risk_percent is not None: update_fields['risk_percent'] = risk_percent
+    
+    # Auto-calculate risk/reward ratio
+    if entry_price and stop_loss and target_price:
+        risk = abs(entry_price - stop_loss)
+        reward = abs(target_price - entry_price)
+        if risk > 0:
+            update_fields['risk_reward_ratio'] = round(reward / risk, 2)
+    
+    # Try update with analysis_date first
+    result = col.update_one(
+        {'symbol': symbol, 'analysis_date': date}, 
+        {'$set': update_fields}
+    )
+    
+    # If not found, try with saved_at
+    if result.matched_count == 0:
+        result = col.update_one(
+            {'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}}, 
+            {'$set': update_fields}
+        )
+    
+    return {"updated": result.modified_count, "matched": result.matched_count}
 
 @app.get("/api/collection-symbols")
 async def get_collection_symbols(collection: str = Query(...), date: str = Query(None)):
@@ -384,13 +423,16 @@ async def dashboard():
         button { cursor: pointer; background: #0f3460; }
         .delete-all-btn { background: #ff4757; color: #fff; font-weight: bold; }
         .alert-config-btn { background: #ffa500; color: #000; font-weight: bold; }
+        .trade-btn { background: #00cc66; color: #000; font-weight: bold; margin-left: auto; }
         table { width: 100%; border-collapse: collapse; font-size: 0.7em; background: #111122; border-radius: 10px; overflow: hidden; }
         th { background: #1a1a2e; padding: 10px 5px; color: #00d4ff; white-space: nowrap; }
         td { padding: 5px; border-bottom: 1px solid #222; white-space: nowrap; }
         .edit-btn { background: #ffa500; color: #000; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
         .delete-btn { background: #ff4757; color: #fff; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
         .save-btn { background: #00ff88; color: #000; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
+        .trade-edit-btn { background: #7b2ff7; color: #fff; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; font-weight: bold; min-width: 50px; }
         .edited-badge { background: #ffa500; color: #000; padding: 2px 6px; border-radius: 10px; font-size: 0.7em; margin-left: 5px; }
+        .trade-badge { background: #cc00cc; color: #fff; padding: 2px 6px; border-radius: 10px; font-size: 0.7em; margin-left: 5px; }
         .editable-input { background: #1a1a2e; color: #fff; border: 1px solid #ffa500; padding: 3px; width: 65px; border-radius: 4px; font-size: 0.9em; }
         .signal-SB { color: #00ff88; font-weight: bold; }
         .signal-B { color: #00cc66; font-weight: bold; }
@@ -401,13 +443,20 @@ async def dashboard():
         @keyframes ltpBlink { 0%,100% { background: #ff475730; } 50% { background: #ff475760; } }
         .ltp-above { color: #00ff88 !important; font-weight: bold; }
         .ltp-below { color: #ff4757 !important; font-weight: bold; }
-        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; }
+        .rrr-high { color: #00ff88; font-weight: bold; }
+        .rrr-medium { color: #ffd700; }
+        .rrr-low { color: #ff4757; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; overflow-y: auto; }
         .modal.open { display: flex; }
-        .modal-content { background: #1a1a2e; padding: 25px; border-radius: 15px; max-width: 500px; width: 90%; border: 2px solid #ffa500; }
+        .modal-content { background: #1a1a2e; padding: 25px; border-radius: 15px; max-width: 550px; width: 90%; border: 2px solid #ffa500; max-height: 90vh; overflow-y: auto; }
+        .trade-modal-content { border-color: #00cc66; }
         .modal-content h3 { color: #ffa500; margin-bottom: 15px; }
+        .trade-modal-content h3 { color: #00cc66; }
         .modal-content select, .modal-content input { width: 100%; padding: 10px; margin-bottom: 10px; }
         .modal-buttons { display: flex; gap: 10px; margin-top: 15px; }
         .modal-buttons button { flex: 1; }
+        .trade-summary { background: #0f3460; padding: 15px; border-radius: 10px; margin: 15px 0; }
+        .trade-summary span { display: block; margin: 5px 0; }
         @media (max-width: 768px) { .header h1 { font-size: 1.5em; } }
     </style>
 </head>
@@ -432,10 +481,12 @@ async def dashboard():
         <input type="text" id="symbolSearch" onkeyup="loadCurrentTab()" style="width:120px;">
         <button onclick="loadCurrentTab()">🔄 Refresh</button>
         <button class="alert-config-btn" onclick="openAlertModal()">🔔 Alerts</button>
-        <button class="delete-all-btn" onclick="deleteAllByDate()">🗑️ Delete All (Date)</button>
+        <button class="delete-all-btn" onclick="deleteAllByDate()">🗑️ Delete All</button>
+        <button class="trade-btn" onclick="openTradeModal()">💰 Trade</button>
         <span id="recordCount" style="color:#888;"></span>
     </div>
     
+    <!-- Alert Modal -->
     <div id="alertModal" class="modal">
         <div class="modal-content">
             <h3>🔔 Configure LTP Alerts</h3>
@@ -459,6 +510,37 @@ async def dashboard():
         </div>
     </div>
     
+    <!-- Trade Management Modal -->
+    <div id="tradeModal" class="modal">
+        <div class="modal-content trade-modal-content">
+            <h3>💰 Trade Management</h3>
+            <label>📋 Select Symbol:</label>
+            <select id="tradeSymbolSelect" onchange="onTradeSymbolChange()"><option value="">-- Loading... --</option></select>
+            <label>📊 Entry Price:</label>
+            <input type="number" id="tradeEntryPrice" placeholder="Enter entry price..." step="0.01" oninput="calculateTradeStats()">
+            <label>🛑 Stop Loss:</label>
+            <input type="number" id="tradeStopLoss" placeholder="Enter stop loss..." step="0.01" oninput="calculateTradeStats()">
+            <label>🎯 Target Price:</label>
+            <input type="number" id="tradeTargetPrice" placeholder="Enter target price..." step="0.01" oninput="calculateTradeStats()">
+            <label>💵 Total Exposure (Taka):</label>
+            <input type="number" id="tradeTotalExposure" placeholder="Total capital in Taka..." step="0.01" oninput="calculateTradeStats()">
+            <label>⚠️ Risk %:</label>
+            <input type="number" id="tradeRiskPercent" placeholder="Risk percentage (e.g., 2)..." step="0.01" oninput="calculateTradeStats()">
+            
+            <div class="trade-summary" id="tradeSummary" style="display:none;">
+                <span>📊 <strong>Risk/Reward Ratio:</strong> <span id="tradeRRR">-</span></span>
+                <span>💸 <strong>Risk Amount:</strong> ৳<span id="tradeRiskAmount">0</span></span>
+                <span>🎯 <strong>Potential Profit:</strong> ৳<span id="tradeProfitAmount">0</span></span>
+                <span>📈 <strong>Quantity:</strong> <span id="tradeQuantity">0</span> shares</span>
+            </div>
+            
+            <div class="modal-buttons">
+                <button class="save-btn" onclick="saveTrade()">💾 Save Trade</button>
+                <button onclick="closeTradeModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+    
     <div id="alertStatusBar" style="background:#0f3460;padding:6px 12px;border-radius:6px;margin-bottom:8px;display:none;color:#ffa500;font-size:0.8em;"></div>
     <div style="overflow-x:auto;" id="dynamicTable"></div>
 
@@ -468,6 +550,7 @@ async def dashboard():
         let dseLtpData = {};
         let editingRow = null;
         let alertRules = [];
+        let currentTradeSymbol = null;
 
         const COLLECTION_MAP = { 
             ai_signals: 'daily_ai_signals', 
@@ -518,26 +601,18 @@ async def dashboard():
             document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
         }
 
-        // loadDseLtp ফাংশনটি রিপ্লেস করুন (প্রায় 510 লাইনের কাছাকাছি):
         async function loadDseLtp() {
             try { 
-                console.log('🔄 LTP ফেচ করার চেষ্টা করছি...');
                 const r = await fetch('/api/dse-ltp'); 
                 const j = await r.json();
-                console.log('📊 LTP API রেসপন্স:', j.status, j.total_symbols || 0, 'টি সিম্বল');
-        
                 if (j.status === 'live') {
                     dseLtpData = j.ltp_data || {};
-                    console.log('✅ LTP ডাটা আপডেট হয়েছে:', Object.keys(dseLtpData).length, 'টি সিম্বল');
                 } else if (j.status === 'closed') {
-                    dseLtpData = {}; // মার্কেট বন্ধ থাকলে ডাটা খালি করুন
-                    console.log('🔴 DSE বন্ধ - LTP ডাটা ক্লিয়ার করা হয়েছে');
-                } else {
-                    console.log('⚠️ LTP স্ট্যাটাস:', j.status, j.message || '');
+                    dseLtpData = {};
                 }
-                renderCurrentTab(); // টেবিল রি-রেন্ডার
+                renderCurrentTab();
             } catch(e) {
-                console.error('❌ LTP ফেচ করতে সমস্যা:', e.message);
+                console.error('LTP fetch error:', e.message);
             }
         }
 
@@ -626,6 +701,147 @@ async def dashboard():
             return `<span class="${cls}" style="font-weight:bold;">${ltp.toFixed(2)}${arrow}</span>`;
         }
 
+        function getRRRClass(rrr) {
+            if (!rrr || rrr === 0) return '';
+            if (rrr >= 2) return 'rrr-high';
+            if (rrr >= 1) return 'rrr-medium';
+            return 'rrr-low';
+        }
+
+        function calculateTradeStats() {
+            const entry = parseFloat(document.getElementById('tradeEntryPrice').value) || 0;
+            const sl = parseFloat(document.getElementById('tradeStopLoss').value) || 0;
+            const tp = parseFloat(document.getElementById('tradeTargetPrice').value) || 0;
+            const exposure = parseFloat(document.getElementById('tradeTotalExposure').value) || 0;
+            const riskPct = parseFloat(document.getElementById('tradeRiskPercent').value) || 0;
+            
+            const summary = document.getElementById('tradeSummary');
+            
+            if (entry > 0 && sl > 0 && tp > 0) {
+                summary.style.display = 'block';
+                const risk = Math.abs(entry - sl);
+                const reward = Math.abs(tp - entry);
+                const rrr = risk > 0 ? (reward / risk).toFixed(2) : '0';
+                
+                document.getElementById('tradeRRR').textContent = rrr;
+                document.getElementById('tradeRRR').className = getRRRClass(parseFloat(rrr));
+                
+                if (exposure > 0 && riskPct > 0) {
+                    const riskAmount = (exposure * riskPct) / 100;
+                    const quantity = risk > 0 ? Math.floor(riskAmount / risk) : 0;
+                    const profitAmount = quantity * reward;
+                    
+                    document.getElementById('tradeRiskAmount').textContent = riskAmount.toFixed(2);
+                    document.getElementById('tradeProfitAmount').textContent = profitAmount.toFixed(2);
+                    document.getElementById('tradeQuantity').textContent = quantity;
+                }
+            } else {
+                summary.style.display = 'none';
+            }
+        }
+
+        async function onTradeSymbolChange() {
+            const symbol = document.getElementById('tradeSymbolSelect').value;
+            if (!symbol || symbol.includes('--')) return;
+            
+            currentTradeSymbol = symbol;
+            
+            // Load existing trade data if available
+            const record = currentData.find(r => r.symbol === symbol);
+            if (record) {
+                document.getElementById('tradeEntryPrice').value = record.entry_price || '';
+                document.getElementById('tradeStopLoss').value = record.stop_loss || '';
+                document.getElementById('tradeTargetPrice').value = record.target_price || '';
+                document.getElementById('tradeTotalExposure').value = record.total_exposure || '';
+                document.getElementById('tradeRiskPercent').value = record.risk_percent || '';
+            } else {
+                document.getElementById('tradeEntryPrice').value = '';
+                document.getElementById('tradeStopLoss').value = '';
+                document.getElementById('tradeTargetPrice').value = '';
+                document.getElementById('tradeTotalExposure').value = '';
+                document.getElementById('tradeRiskPercent').value = '';
+            }
+            calculateTradeStats();
+        }
+
+        async function openTradeModal() {
+            document.getElementById('tradeModal').classList.add('open');
+            await loadTradeSymbols();
+        }
+        
+        function closeTradeModal() { 
+            document.getElementById('tradeModal').classList.remove('open'); 
+        }
+
+        async function loadTradeSymbols() {
+            const date = document.getElementById('dateSelect').value;
+            const collection = COLLECTION_MAP[currentTab];
+            const select = document.getElementById('tradeSymbolSelect');
+            select.innerHTML = '<option value="">Loading...</option>';
+            try {
+                let url = `/api/collection-symbols?collection=${collection}`;
+                if (date) url += `&date=${date}`;
+                const symbols = await (await fetch(url)).json();
+                select.innerHTML = '<option value="">-- Select Symbol --</option>';
+                if (symbols.length > 0) {
+                    symbols.forEach(s => { 
+                        const o = document.createElement('option'); 
+                        o.value = s; 
+                        o.textContent = s; 
+                        select.appendChild(o); 
+                    });
+                }
+            } catch(e) { 
+                select.innerHTML = '<option value="">Error</option>'; 
+            }
+        }
+
+        async function saveTrade() {
+            const symbol = document.getElementById('tradeSymbolSelect').value;
+            if (!symbol || symbol.includes('--')) {
+                alert('Please select a symbol!');
+                return;
+            }
+            
+            const entry = parseFloat(document.getElementById('tradeEntryPrice').value) || 0;
+            const sl = parseFloat(document.getElementById('tradeStopLoss').value) || 0;
+            const tp = parseFloat(document.getElementById('tradeTargetPrice').value) || 0;
+            const exposure = parseFloat(document.getElementById('tradeTotalExposure').value) || 0;
+            const riskPct = parseFloat(document.getElementById('tradeRiskPercent').value) || 0;
+            
+            // Find record date
+            const record = currentData.find(r => r.symbol === symbol);
+            const date = record ? (record.analysis_date || record.date || '') : '';
+            
+            if (!date) {
+                alert('Could not find date for this symbol!');
+                return;
+            }
+            
+            const collection = COLLECTION_MAP[currentTab];
+            const params = new URLSearchParams({
+                collection: collection,
+                symbol: symbol,
+                date: date
+            });
+            
+            if (entry) params.append('entry_price', entry);
+            if (sl) params.append('stop_loss', sl);
+            if (tp) params.append('target_price', tp);
+            if (exposure) params.append('total_exposure', exposure);
+            if (riskPct) params.append('risk_percent', riskPct);
+            
+            try {
+                const r = await fetch(`/api/update-trade?${params}`, { method: 'PUT' });
+                const result = await r.json();
+                alert(`Trade saved successfully! (${result.updated} record(s) updated)`);
+                closeTradeModal();
+                loadCurrentTab();
+            } catch(e) {
+                alert('Failed to save trade: ' + e.message);
+            }
+        }
+
         function startEdit(symbol, date, entry, sl, tp, i) { editingRow = { symbol, date, rowIndex: i }; renderAITable(); }
         function cancelEdit() { editingRow = null; renderAITable(); }
 
@@ -634,7 +850,14 @@ async def dashboard():
             const entry = parseFloat(document.getElementById(`edit-entry-${safeId}`).value) || 0;
             const sl = parseFloat(document.getElementById(`edit-sl-${safeId}`).value) || 0;
             const tp = parseFloat(document.getElementById(`edit-tp-${safeId}`).value) || 0;
-            const params = new URLSearchParams({ symbol, date, entry_price: entry, stop_loss: sl, target_price: tp });
+            const params = new URLSearchParams({ 
+                collection: COLLECTION_MAP[currentTab],
+                symbol, 
+                date, 
+                entry_price: entry, 
+                stop_loss: sl, 
+                target_price: tp 
+            });
             await fetch(`/api/update-trade?${params}`, { method: 'PUT' });
             editingRow = null;
             loadCurrentTab();
@@ -720,7 +943,7 @@ async def dashboard():
                 <th>Agentic</th><th>Ag Bias</th><th>Ag Av</th>
                 <th>E Acc</th><th>E Tot</th><th>E Wave</th><th>Sub-Wave</th>
                 <th>Cur Wave</th><th>W Conf</th><th>Bull?</th><th>W Pos</th>
-                <th>Entry</th><th>SL</th><th>TP</th><th>R:R</th>
+                <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
             </tr></thead><tbody>`;
             
@@ -728,19 +951,24 @@ async def dashboard():
                 const safeId = (r.symbol || '').replace(/[^a-zA-Z0-9]/g, '_');
                 const isEditing = editingRow && editingRow.symbol === r.symbol && editingRow.date === r.analysis_date;
                 const isEdited = r.edited === true;
+                const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
                 const ltpDisplay = getLtpDisplay(r.symbol);
                 const alertStatus = getLtpAlertStatus(r.symbol);
                 const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
                 
-                const entryCell = isEditing ? `<input class="editable-input" id="edit-entry-${safeId}" value="${(r.entry_price||0).toFixed(2)}">` : (r.entry_price||0).toFixed(2);
-                const slCell = isEditing ? `<input class="editable-input" id="edit-sl-${safeId}" value="${(r.stop_loss||0).toFixed(2)}">` : (r.stop_loss||0).toFixed(2);
-                const tpCell = isEditing ? `<input class="editable-input" id="edit-tp-${safeId}" value="${(r.target_price||0).toFixed(2)}">` : (r.target_price||0).toFixed(2);
+                const rrr = r.risk_reward_ratio || 0;
+                const rrrClass = getRRRClass(rrr);
+                
+                const entryCell = isEditing ? `<input class="editable-input" id="edit-entry-${safeId}" value="${(r.entry_price||0).toFixed(2)}">` : (r.entry_price ? `<span style="color:#00ff88;">${r.entry_price.toFixed(2)}</span>` : '-');
+                const slCell = isEditing ? `<input class="editable-input" id="edit-sl-${safeId}" value="${(r.stop_loss||0).toFixed(2)}">` : (r.stop_loss ? `<span style="color:#ff4757;">${r.stop_loss.toFixed(2)}</span>` : '-');
+                const tpCell = isEditing ? `<input class="editable-input" id="edit-tp-${safeId}" value="${(r.target_price||0).toFixed(2)}">` : (r.target_price ? `<span style="color:#00d4ff;">${r.target_price.toFixed(2)}</span>` : '-');
+                
                 const actionCell = isEditing 
                     ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>`
-                    : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}')">🗑️</button>`;
+                    : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}')">🗑️</button>`;
                 
                 html += `<tr class="${alertRowClass}">
-                    <td>${i+1}</td><td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${alertStatus ? ' 🔔' : ''}</strong></td>
+                    <td>${i+1}</td><td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}</strong></td>
                     <td>${r.analysis_date||''}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${ltpDisplay}</td>
                     <td>${r.sector||''}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
                     <td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td>
@@ -759,7 +987,10 @@ async def dashboard():
                     <td>${r.elliott_current_wave||''}</td><td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
                     <td>${r.elliott_is_bullish ? '✅' : '❌'}</td><td>${r.elliott_wave_position||''}</td>
                     <td>${entryCell}</td><td>${slCell}</td><td>${tpCell}</td>
-                    <td>${r.risk_reward_ratio||0}</td><td>${actionCell}</td>
+                    <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
+                    <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
+                    <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
+                    <td>${actionCell}</td>
                 </tr>`;
             });
             html += '</tbody></table>';
@@ -779,15 +1010,21 @@ async def dashboard():
                 <th>Prev Week</th><th>Curr Week</th>
                 <th>Daily Div</th><th>Daily Strength</th>
                 <th>Daily Last RSI</th><th>Daily Prev RSI</th>
+                <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
+                <th>Act</th>
             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const ltpDisplay = getLtpDisplay(r.symbol);
                 const alertStatus = getLtpAlertStatus(r.symbol);
                 const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
+                const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
+                const rrr = r.risk_reward_ratio || 0;
+                const rrrClass = getRRRClass(rrr);
+                const recordDate = r.analysis_date || r.date || '';
                 
                 html += `<tr class="${alertRowClass}">
-                    <td>${i+1}</td><td><strong>${r.symbol || ''}${alertStatus ? ' 🔔' : ''}</strong></td><td>${r.sector || ''}</td>
+                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}</strong></td><td>${r.sector || ''}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
                     <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
@@ -798,6 +1035,13 @@ async def dashboard():
                     <td>${r.weekly_prev_date || ''}</td><td>${r.weekly_curr_date || ''}</td>
                     <td>${r.daily_divergence_type || ''}</td><td>${r.daily_divergence_strength || ''}</td>
                     <td>${(r.daily_last_rsi || 0).toFixed(2)}</td><td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
+                    <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
+                    <td>${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
+                    <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
+                    <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
+                    <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
+                    <td><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${recordDate}','swrsi')">🗑️</button></td>
                 </tr>`;
             });
             html += '</tbody></table>';
@@ -808,13 +1052,14 @@ async def dashboard():
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
             
-            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date','symbol'];
+            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at'];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             
             let html = `<table><thead><tr>
                 <th>#</th><th>Symbol</th><th>LTP</th>
                 ${keys.map(k => `<th>${k}</th>`).join('')}
-                <th>🗑️</th>
+                <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
+                <th>Act</th>
             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
@@ -822,18 +1067,35 @@ async def dashboard():
                 const alertStatus = getLtpAlertStatus(r.symbol);
                 const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
                 const recordDate = r.analysis_date || r.date || r.level_date || (r.saved_at||'').substring(0,10) || '';
+                const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
+                const rrr = r.risk_reward_ratio || 0;
+                const rrrClass = getRRRClass(rrr);
                 
                 html += `<tr class="${alertRowClass}">
                     <td>${i+1}</td>
-                    <td><strong>${r.symbol || ''}${alertStatus ? ' 🔔' : ''}</strong></td>
+                    <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}</strong></td>
                     <td>${ltpDisplay}</td>
                     ${keys.map(k => `<td>${r[k]??''}</td>`).join('')}
-                    <td><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${recordDate}','${currentTab}')">🗑️</button></td>
+                    <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
+                    <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
+                    <td>${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
+                    <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
+                    <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
+                    <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
+                    <td><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${recordDate}','${currentTab}')">🗑️</button></td>
                 </tr>`;
             });
             html += '</tbody></table>';
             div.innerHTML = html;
             document.getElementById('recordCount').textContent = `(${currentData.length} records)`;
+        }
+
+        async function openTradeForSymbol(symbol) {
+            const select = document.getElementById('tradeSymbolSelect');
+            await loadTradeSymbols();
+            select.value = symbol;
+            onTradeSymbolChange();
+            openTradeModal();
         }
     </script>
 </body>
