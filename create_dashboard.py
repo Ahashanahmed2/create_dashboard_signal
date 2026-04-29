@@ -92,8 +92,7 @@ async def market_status():
         "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S')
     }
 
-@app.get("/api/dse-ltp")
-a# এই ফাংশনটি আপনার create_dashboard.py-তে রিপ্লেস করুন
+# এই ফাংশনটি আপনার create_dashboard.py-তে রিপ্লেস করুন
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
     now = get_bd_time()
