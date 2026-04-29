@@ -93,29 +93,137 @@ async def market_status():
     }
 
 @app.get("/api/dse-ltp")
+a# এই ফাংশনটি আপনার create_dashboard.py-তে রিপ্লেস করুন
+@app.get("/api/dse-ltp")
 async def get_dse_ltp():
     now = get_bd_time()
     if not is_dse_market_open():
         return {"status": "closed", "message": "DSE Closed"}
 
     try:
-        response = requests.get("https://www.dsebd.org/dseX_share.php", 
-                               headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        table = soup.find('table')
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+        }
+        
         ltp_data = {}
-        if table:
-            for row in table.find_all('tr')[1:]:
-                cols = row.find_all('td')
-                if len(cols) >= 3:
-                    symbol = cols[0].text.strip()
-                    ltp = cols[1].text.strip().replace(',', '')
-                    try: ltp_data[symbol] = float(ltp)
-                    except: continue
-        return {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data}
-    except Exception as e: 
+        
+        # চেষ্টা ১: main page থেকে table scrape
+        response = requests.get(
+            "https://www.dsebd.org/dseX_share.php",
+            headers=headers,
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # DSE-র পেজে ডেটা row গুলো খুঁজুন
+            # নতুন পদ্ধতি: সব টেক্সট স্ক্যান করে symbol-LTP pair বের করুন
+            all_text = soup.get_text()
+            lines = all_text.split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Pattern: SYMBOL followed by numbers (price, change)
+                # যেমন: "JANATAMF 3.10 0.10 3.33%"
+                parts = line.split()
+                
+                # কমপক্ষে 2 টি অংশ থাকতে হবে (symbol + price)
+                if len(parts) >= 2:
+                    symbol = parts[0]
+                    
+                    # শুধু valid symbol check (all caps, min 2 chars, max 20 chars)
+                    if (symbol.isupper() or symbol.replace('-','').replace('.','').isupper()) and \
+                       2 <= len(symbol) <= 20 and \
+                       not symbol.startswith('%') and \
+                       not symbol.startswith('*') and \
+                       not symbol.startswith('×') and \
+                       not symbol.startswith('>>'):
+                        
+                        try:
+                            # প্রথম সংখ্যাটি LTP
+                            ltp_val = float(parts[1])
+                            if 0.1 <= ltp_val <= 10000:  # Valid price range
+                                ltp_data[symbol] = ltp_val
+                        except ValueError:
+                            continue
+            
+            print(f"🎯 Method 1: Extracted {len(ltp_data)} symbols from text")
+            
+            # Method 2: Parse tables directly
+            if len(ltp_data) < 10:
+                tables = soup.find_all('table')
+                for table in tables:
+                    rows = table.find_all('tr')
+                    for row in rows:
+                        cells = row.find_all(['td', 'th'])
+                        if len(cells) >= 2:
+                            try:
+                                sym = cells[0].get_text(strip=True)
+                                price_text = cells[1].get_text(strip=True).replace(',', '')
+                                
+                                # Clean symbol
+                                sym = sym.replace('#', '').strip()
+                                if sym and len(sym) <= 20 and not sym.startswith('TRADING'):
+                                    price_val = float(price_text)
+                                    if 0.1 <= price_val <= 10000 and sym not in ltp_data:
+                                        ltp_data[sym] = price_val
+                            except (ValueError, IndexError):
+                                continue
+                    
+                    if len(ltp_data) > 10:
+                        break
+                
+                print(f"🎯 Method 2 (tables): Total {len(ltp_data)} symbols")
+        
+        # Minimum symbol threshold check
+        if len(ltp_data) >= 20:
+            sample = list(ltp_data.items())[:3]
+            print(f"✅ Sample LTP: {sample}")
+            return {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data}
+        else:
+            print(f"⚠️ Only found {len(ltp_data)} symbols, trying alternative...")
+            
+            # Fallback: DSE API
+            try:
+                api_resp = requests.get(
+                    "https://www.dsebd.org/latest_share_price_scroll_l.php",
+                    headers=headers,
+                    timeout=10
+                )
+                if api_resp.status_code == 200:
+                    soup = BeautifulSoup(api_resp.content, 'html.parser')
+                    rows = soup.find_all('tr')
+                    for row in rows:
+                        cells = row.find_all('td')
+                        if len(cells) >= 2:
+                            try:
+                                sym = cells[0].get_text(strip=True).replace('#', '')
+                                price = float(cells[1].get_text(strip=True).replace(',', ''))
+                                if 0.1 <= price <= 10000 and sym and sym not in ltp_data:
+                                    ltp_data[sym] = price
+                            except: continue
+                    
+                    print(f"🎯 Fallback: Got {len(ltp_data)} symbols")
+            except Exception as e:
+                print(f"⚠️ Fallback failed: {e}")
+        
+        if len(ltp_data) > 0:
+            return {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data}
+        else:
+            return {"status": "error", "message": "No LTP data found"}
+            
+    except Exception as e:
+        print(f"❌ LTP Error: {e}")
+        import traceback
+        traceback.print_exc()
         return {"status": "error", "message": str(e)}
-
 # ================================
 # FIXED: ALL collections use analysis_date
 # ================================
