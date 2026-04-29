@@ -91,31 +91,85 @@ async def market_status():
         "next_open": next_open,
         "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S')
     }
-
+    
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
+    """DSE থেকে LTP ডাটা ফেচ করুন (শুধুমাত্র মার্কেট খোলা থাকলে)"""
     now = get_bd_time()
+    
+    # মার্কেট খোলা না থাকলে দ্রুত রেসপন্স
     if not is_dse_market_open():
-        return {"status": "closed", "message": "DSE Closed"}
+        return {
+            "status": "closed", 
+            "message": "DSE বন্ধ",
+            "total_symbols": 0,
+            "ltp_data": {}
+        }
 
     try:
-        response = requests.get("https://www.dsebd.org/dseX_share.php", 
-                               headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        # DSE ওয়েবসাইট থেকে ডাটা ফেচ
+        response = requests.get(
+            "https://www.dsebd.org/dseX_share.php", 
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }, 
+            timeout=15
+        )
+        
+        if response.status_code != 200:
+            return {"status": "error", "message": f"DSE সার্ভার থেকে {response.status_code} রেসপন্স পেয়েছি"}
+        
         soup = BeautifulSoup(response.content, 'html.parser')
-        table = soup.find('table')
+        
+        # বিভিন্ন টেবিল ট্রাই করুন
+        tables = soup.find_all('table')
         ltp_data = {}
-        if table:
-            for row in table.find_all('tr')[1:]:
+        
+        for table in tables:
+            rows = table.find_all('tr')
+            if len(rows) < 2:  # খুব ছোট টেবিল স্কিপ
+                continue
+                
+            for row in rows[1:]:  # হেডার স্কিপ
                 cols = row.find_all('td')
                 if len(cols) >= 3:
                     symbol = cols[0].text.strip()
-                    ltp = cols[1].text.strip().replace(',', '')
-                    try: ltp_data[symbol] = float(ltp)
-                    except: continue
-        return {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data}
-    except Exception as e: 
+                    ltp_text = cols[1].text.strip().replace(',', '')
+                    try:
+                        if ltp_text and symbol:  # ভ্যালিড ডাটা চেক
+                            ltp_value = float(ltp_text)
+                            if ltp_value > 0:  # পজিটিভ প্রাইস
+                                ltp_data[symbol] = ltp_value
+                    except ValueError:
+                        continue
+            
+            # যদি ডাটা পাওয়া যায়, তাহলে লুপ ব্রেক
+            if len(ltp_data) > 100:
+                break
+        
+        if ltp_data:
+            return {
+                "status": "live",
+                "total_symbols": len(ltp_data),
+                "ltp_data": ltp_data
+            }
+        else:
+            return {
+                "status": "warning",
+                "message": "DSE থেকে ডাটা পার্স করতে পারিনি",
+                "total_symbols": 0,
+                "ltp_data": {}
+            }
+            
+    except requests.Timeout:
+        return {"status": "error", "message": "DSE সার্ভারে টাইম-আউট"}
+    except requests.ConnectionError:
+        return {"status": "error", "message": "DSE সার্ভারে কানেক্ট করতে পারছি না"}
+    except Exception as e:
+        print(f"LTP ফেচিং এরর: {e}")
         return {"status": "error", "message": str(e)}
-
 # ================================
 # FIXED: ALL collections use analysis_date
 # ================================
@@ -430,11 +484,7 @@ async def dashboard():
         loadDseLtp();
         loadAlertRules();
         setInterval(checkMarketStatus, 60000);
-        setInterval(async () => {
-            const res = await fetch('/api/market-status');
-            const status = await res.json();
-            if (status.is_open) loadDseLtp();
-        }, 60000);
+        setInterval(loadDseLtp, 60000);
 
         function loadAlertRules() {
             const saved = localStorage.getItem('ltpAlertRules_v27');
@@ -468,14 +518,27 @@ async def dashboard():
             document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
         }
 
+        // loadDseLtp ফাংশনটি রিপ্লেস করুন (প্রায় 510 লাইনের কাছাকাছি):
         async function loadDseLtp() {
             try { 
+                console.log('🔄 LTP ফেচ করার চেষ্টা করছি...');
                 const r = await fetch('/api/dse-ltp'); 
-                const j = await r.json(); 
-                if (j.status === 'live') dseLtpData = j.ltp_data || {}; 
-                else dseLtpData = {}; 
-                renderCurrentTab();
-            } catch(e) {}
+                const j = await r.json();
+                console.log('📊 LTP API রেসপন্স:', j.status, j.total_symbols || 0, 'টি সিম্বল');
+        
+                if (j.status === 'live') {
+                    dseLtpData = j.ltp_data || {};
+                    console.log('✅ LTP ডাটা আপডেট হয়েছে:', Object.keys(dseLtpData).length, 'টি সিম্বল');
+                } else if (j.status === 'closed') {
+                    dseLtpData = {}; // মার্কেট বন্ধ থাকলে ডাটা খালি করুন
+                    console.log('🔴 DSE বন্ধ - LTP ডাটা ক্লিয়ার করা হয়েছে');
+                } else {
+                    console.log('⚠️ LTP স্ট্যাটাস:', j.status, j.message || '');
+                }
+                renderCurrentTab(); // টেবিল রি-রেন্ডার
+            } catch(e) {
+                console.error('❌ LTP ফেচ করতে সমস্যা:', e.message);
+            }
         }
 
         async function loadDates(c) { 
