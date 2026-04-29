@@ -1052,7 +1052,7 @@ async def dashboard():
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
             
-            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at'];
+            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at','p1_date','p2_date','level_date','level_price','type'];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             
             let html = `<table><thead><tr>
