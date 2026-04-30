@@ -96,83 +96,53 @@ async def market_status():
     
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
-    """DSE থেকে LTP ডাটা ফেচ করুন (শুধুমাত্র মার্কেট খোলা থাকলে)"""
-    now = get_bd_time()
-    
-    # মার্কেট খোলা না থাকলে দ্রুত রেসপন্স
     if not is_dse_market_open():
-        return {
-            "status": "closed", 
-            "message": "DSE বন্ধ",
-            "total_symbols": 0,
-            "ltp_data": {}
-        }
+        return {"status": "closed", "ltp_data": {}}
 
     try:
-        # DSE ওয়েবসাইট থেকে ডাটা ফেচ
         response = requests.get(
-            "https://www.dsebd.org/dseX_share.php", 
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml',
-                'Accept-Language': 'en-US,en;q=0.9',
-            }, 
+            "https://www.dsebd.org/dseX_share.php",
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
             timeout=15
         )
         
-        if response.status_code != 200:
-            return {"status": "error", "message": f"DSE সার্ভার থেকে {response.status_code} রেসপন্স পেয়েছি"}
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # বিভিন্ন টেবিল ট্রাই করুন
-        tables = soup.find_all('table')
+        soup = BeautifulSoup(response.text, 'html.parser')
         ltp_data = {}
         
-        for table in tables:
-            rows = table.find_all('tr')
-            if len(rows) < 2:  # খুব ছোট টেবিল স্কিপ
-                continue
-                
-            for row in rows[1:]:  # হেডার স্কিপ
-                cols = row.find_all('td')
-                if len(cols) >= 3:
-                    symbol = cols[0].text.strip()
-                    ltp_text = cols[1].text.strip().replace(',', '')
-                    try:
-                        if ltp_text and symbol:  # ভ্যালিড ডাটা চেক
-                            ltp_value = float(ltp_text)
-                            if ltp_value > 0:  # পজিটিভ প্রাইস
-                                ltp_data[symbol] = ltp_value
-                    except ValueError:
-                        continue
-            
-            # যদি ডাটা পাওয়া যায়, তাহলে লুপ ব্রেক
-            if len(ltp_data) > 100:
+        # টেবিল খুঁজে বের করা
+        table = None
+        for t in soup.find_all('table'):
+            if 'TRADING CODE' in str(t) or len(t.find_all('tr')) > 100:
+                table = t
                 break
         
-        if ltp_data:
-            return {
-                "status": "live",
-                "total_symbols": len(ltp_data),
-                "ltp_data": ltp_data
-            }
-        else:
-            return {
-                "status": "warning",
-                "message": "DSE থেকে ডাটা পার্স করতে পারিনি",
-                "total_symbols": 0,
-                "ltp_data": {}
-            }
-            
-    except requests.Timeout:
-        return {"status": "error", "message": "DSE সার্ভারে টাইম-আউট"}
-    except requests.ConnectionError:
-        return {"status": "error", "message": "DSE সার্ভারে কানেক্ট করতে পারছি না"}
+        if table:
+            rows = table.find_all('tr')
+            for row in rows:
+                cols = row.find_all('td')
+                if len(cols) >= 2:
+                    symbol = cols[0].get_text(strip=True)
+                    price_text = cols[1].get_text(strip=True).replace(',', '')
+                    
+                    # শুধু বৈধ ট্রেডিং কোড নেওয়া (লেটার ও নম্বর দিয়ে শুরু)
+                    if symbol and symbol[0].isalpha() and price_text and price_text != '0':
+                        try:
+                            price = float(price_text)
+                            if price > 0 and price < 100000:  # সীমার মধ্যে প্রাইস
+                                ltp_data[symbol] = price
+                        except:
+                            pass
+        
+        print(f"DSE LTP: Scraped {len(ltp_data)} symbols")  # লগে দেখার জন্য
+        return {
+            "status": "live" if ltp_data else "warning",
+            "total_symbols": len(ltp_data),
+            "ltp_data": ltp_data
+        }
+        
     except Exception as e:
-        print(f"LTP ফেচিং এরর: {e}")
-        return {"status": "error", "message": str(e)}
-
+        print(f"DSE LTP Error: {e}")
+        return {"status": "error", "message": str(e), "ltp_data": {}}
 # ================================
 # FIXED: ALL collections use analysis_date
 # ================================
