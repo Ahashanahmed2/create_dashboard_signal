@@ -94,54 +94,99 @@ async def market_status():
         "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S')
     }
     
+
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
+    """DSE থেকে LTP ডাটা ফেচ করুন (শুধুমাত্র মার্কেট খোলা থাকলে)"""
     if not is_dse_market_open():
         return {"status": "closed", "ltp_data": {}}
 
+    # প্রথমে DSE মোবাইল API ট্রাই করি (সবচেয়ে রিলাইএবল)
     try:
+        # DSE-এর unofficial JSON API
+        api_url = "https://www.dsebd.org/latest_share_price_scroll.php"
         response = requests.get(
-            "https://www.dsebd.org/dseX_share.php",
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+            api_url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+                'Accept': 'application/json, text/html',
+                'X-Requested-With': 'XMLHttpRequest'
+            },
             timeout=15
         )
         
-        soup = BeautifulSoup(response.text, 'html.parser')
         ltp_data = {}
         
-        # টেবিল খুঁজে বের করা
-        table = None
-        for t in soup.find_all('table'):
-            if 'TRADING CODE' in str(t) or len(t.find_all('tr')) > 100:
-                table = t
-                break
+        # JSON response চেক করি
+        if response.text and response.text.strip().startswith('{'):
+            try:
+                data = response.json()
+                if isinstance(data, dict) and 'data' in data:
+                    for item in data['data']:
+                        symbol = item.get('trading_code') or item.get('symbol')
+                        ltp = item.get('ltp') or item.get('last_price')
+                        if symbol and ltp and float(ltp) > 0:
+                            ltp_data[symbol] = float(ltp)
+            except:
+                pass
         
-        if table:
-            rows = table.find_all('tr')
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) >= 2:
-                    symbol = cols[0].get_text(strip=True)
-                    price_text = cols[1].get_text(strip=True).replace(',', '')
+        # JSON না পেলে HTML টেবিল পার্স করি
+        if not ltp_data:
+            # অল্টারনেট URL
+            response2 = requests.get(
+                "https://www.dsebd.org/displayCompany.php",
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                timeout=15
+            )
+            
+            soup = BeautifulSoup(response2.text, 'html.parser')
+            
+            # সব টেবিল চেক করি
+            for table in soup.find_all('table'):
+                rows = table.find_all('tr')
+                if len(rows) < 10:
+                    continue
                     
-                    # শুধু বৈধ ট্রেডিং কোড নেওয়া (লেটার ও নম্বর দিয়ে শুরু)
-                    if symbol and symbol[0].isalpha() and price_text and price_text != '0':
-                        try:
-                            price = float(price_text)
-                            if price > 0 and price < 100000:  # সীমার মধ্যে প্রাইস
-                                ltp_data[symbol] = price
-                        except:
-                            pass
+                for row in rows:
+                    cols = row.find_all('td')
+                    if len(cols) >= 2:
+                        symbol = cols[0].get_text(strip=True)
+                        price_text = cols[1].get_text(strip=True).replace(',', '')
+                        
+                        # বৈধ সিম্বল চেক (শুধু লেটার এবং সংখ্যা)
+                        if symbol and len(symbol) >= 2 and symbol[0].isalpha():
+                            try:
+                                price = float(price_text)
+                                if 0 < price < 50000:  # যুক্তিসঙ্গত প্রাইস রেঞ্জ
+                                    ltp_data[symbol.upper()] = price
+                            except:
+                                continue
+                    
+                    # যথেষ্ট ডাটা পেলে ব্রেক
+                    if len(ltp_data) > 100:
+                        break
+                
+                if len(ltp_data) > 100:
+                    break
         
-        print(f"DSE LTP: Scraped {len(ltp_data)} symbols")  # লগে দেখার জন্য
-        return {
-            "status": "live" if ltp_data else "warning",
-            "total_symbols": len(ltp_data),
-            "ltp_data": ltp_data
-        }
+        print(f"DSE LTP: Scraped {len(ltp_data)} symbols")
         
+        if ltp_data:
+            return {
+                "status": "live",
+                "total_symbols": len(ltp_data),
+                "ltp_data": ltp_data
+            }
+        else:
+            return {
+                "status": "warning",
+                "message": "DSE থেকে ডাটা পাওয়া যায়নি",
+                "total_symbols": 0,
+                "ltp_data": {}
+            }
+            
     except Exception as e:
-        print(f"DSE LTP Error: {e}")
+        print(f"DSE LTP Error: {str(e)}")
         return {"status": "error", "message": str(e), "ltp_data": {}}
 # ================================
 # FIXED: ALL collections use analysis_date
