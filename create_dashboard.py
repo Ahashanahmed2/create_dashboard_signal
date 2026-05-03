@@ -209,13 +209,13 @@ async def get_dse_ltp():
         if ltp_data:
             return {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data}
         else:
-            return {"status": "warning", "message": "Data not available", "ltp_data": {}}
+            return {"status": "warning", "message": "Data not available", "ltp_data": {}}"""
             
     except Exception as e:
         print(f"DSE LTP Error: {e}")
         return {"status": "error", "message": str(e), "ltp_data": {}}
 
-"""
+
 # ================================
 # FIXED: ALL collections use analysis_date
 # ================================
