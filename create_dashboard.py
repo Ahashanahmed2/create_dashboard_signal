@@ -168,6 +168,8 @@ async def get_dse_ltp():
                 
                 if len(ltp_data) > 100:
                     break
+
+"""
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
     if not is_dse_market_open():
@@ -212,6 +214,8 @@ async def get_dse_ltp():
     except Exception as e:
         print(f"DSE LTP Error: {e}")
         return {"status": "error", "message": str(e), "ltp_data": {}}
+
+"""
 # ================================
 # FIXED: ALL collections use analysis_date
 # ================================
