@@ -168,57 +168,12 @@ async def get_dse_ltp():
                 
                 if len(ltp_data) > 100:
                     break
-
-            return {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data}
-        except Exception as e:
-            print(f"DSE LTP Error: {e}")
-            return {"status": "error", "message": str(e), "ltp_data": {}}
-
-"""
-@app.get("/api/dse-ltp")
-async def get_dse_ltp():
-    if not is_dse_market_open():
-        return {"status": "closed", "ltp_data": {}}
-
-    # DSE মোবাইল সাইট
-    try:
-        response = requests.get(
-            "https://www.dsebd.org/market_summary.php",
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-            },
-            timeout=15
-        )
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        ltp_data = {}
-        
-        # JSON-লাইক ডাটা খোঁজা
-        scripts = soup.find_all('script')
-        for script in scripts:
-            if script.string and 'var data' in script.string:
-                import re
-                matches = re.findall(r'["\']([A-Z]+)["\'].*?["\']([0-9.]+)["\']', script.string)
-                for symbol, price in matches:
-                    try:
-                        ltp_data[symbol] = float(price)
-                    except:
-                        pass
-        
-        print(f"DSE LTP: Scraped {len(ltp_data)} symbols from mobile site")
-        
-        if ltp_data:
-            return {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data}
-        else:
-            return {"status": "warning", "message": "Data not available", "ltp_data": {}}
-            
+        return {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data}
+                
     except Exception as e:
         print(f"DSE LTP Error: {e}")
-        return {"status": "error", "message": str(e), "ltp_data": {}}"""
+        return {"status": "error", "message": str(e), "ltp_data": {}}
 
 
 # ================================
