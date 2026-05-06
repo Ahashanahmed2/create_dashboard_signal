@@ -153,7 +153,7 @@ async def get_dse_ltp():
                             symbol = symbol_link.text.strip() if symbol_link else cols[1].get_text(strip=True) if len(cols) > 1 else None
                             
                             # LTP (৪র্থ কলাম)
-                            ltp_text = cols[3].get_text(strip=True).replace(',', '') if len(cols) > 3 else None
+                            ltp_text = cols[2].get_text(strip=True).replace(',', '') if len(cols) > 3 else None
                             
                             if symbol and ltp_text and len(symbol) >= 2 and symbol[0].isalpha():
                                 try:
