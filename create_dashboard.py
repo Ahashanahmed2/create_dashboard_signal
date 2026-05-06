@@ -155,27 +155,58 @@ async def get_dse_ltp():
                         
                         # বৈধ সিম্বল চেক (শুধু লেটার এবং সংখ্যা)
                         if symbol and len(symbol) >= 2 and symbol[0].isalpha():
-                            try:
-                                price = float(price_text)
-                                if 0 < price < 50000:  # যুক্তিসঙ্গত প্রাইস রেঞ্জ
-                                    ltp_data[symbol.upper()] = price
-                            except:
-                                continue
-                    
-                    # যথেষ্ট ডাটা পেলে ব্রেক
-                    if len(ltp_data) > 100:
-                        break
-                
-                if len(ltp_data) > 100:
-                    break
+
+# আলাদা টেস্ট এন্ডপয়েন্ট
+@app.get("/api/test-ltp-scraping")
+async def test_ltp_scraping():
+    """LTP স্ক্র্যাপিং টেস্ট করার জন্য"""
+    import traceback
+    
+    results = {}
+    
+    # টেস্ট ১: DSE AJAX API
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0', 'X-Requested-With': 'XMLHttpRequest'}
+        response = requests.get('https://www.dsebd.org/latest_share_price_scroll_l.php', headers=headers, timeout=10)
+        results['test_1_status'] = response.status_code
+        results['test_1_size'] = len(response.text)
         
-        return {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data}
-                
+        soup = BeautifulSoup(response.text, 'html.parser')
+        tables = soup.find_all('table')
+        results['test_1_tables'] = len(tables)
+        
+        if tables:
+            rows = tables[0].find_all('tr')
+            results['test_1_rows'] = len(rows)
+            if rows:
+                cols = rows[0].find_all('td')
+                results['test_1_first_row_cols'] = len(cols)
+                if len(cols) > 3:
+                    results['test_1_first_row_data'] = [col.get_text(strip=True)[:30] for col in cols[:5]]
     except Exception as e:
-        print(f"DSE LTP Error: {e}")
-        return {"status": "error", "message": str(e), "ltp_data": {}}
-
-
+        results['test_1_error'] = str(e)
+    
+    # টেস্ট ২: LTP পেজ
+    try:
+        response = requests.get('https://www.dsebd.org/latest_share_price_scroll_by_ltp.php', 
+                               headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        results['test_2_status'] = response.status_code
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        tables = soup.find_all('table')
+        results['test_2_tables'] = len(tables)
+        
+        if tables:
+            for i, table in enumerate(tables[:3]):
+                rows = table.find_all('tr')
+                results[f'test_2_table_{i}_rows'] = len(rows)
+    except Exception as e:
+        results['test_2_error'] = str(e)
+    
+    results['bangladesh_time'] = get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
+    results['market_open'] = is_dse_market_open()
+    
+    return results
 # ================================
 # FIXED: ALL collections use analysis_date
 # ================================
