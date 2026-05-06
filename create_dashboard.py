@@ -96,57 +96,150 @@ async def market_status():
     
 
 
-# আলাদা টেস্ট এন্ডপয়েন্ট
-@app.get("/api/test-ltp-scraping")
-async def test_ltp_scraping():
-    """LTP স্ক্র্যাপিং টেস্ট করার জন্য"""
-    import traceback
+# LTP Cache
+ltp_cache = {"data": {}, "timestamp": None}
+
+@app.get("/api/dse-ltp")
+async def get_dse_ltp():
+    """DSE থেকে LTP ডাটা ফেচ করুন - একাধিক ফলব্যাক সহ"""
     
-    results = {}
+    # ক্যাশ চেক (2 মিনিট)
+    if ltp_cache["timestamp"]:
+        age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
+        if age < 120 and ltp_cache["data"]:
+            return ltp_cache["data"]
     
-    # টেস্ট ১: DSE AJAX API
+    if not is_dse_market_open():
+        result = {"status": "closed", "ltp_data": {}, "message": "মার্কেট বন্ধ"}
+        ltp_cache["data"] = result
+        ltp_cache["timestamp"] = get_bd_time()
+        return result
+
+    ltp_data = {}
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    })
+
+    # পদ্ধতি ১: DSE AJAX API
     try:
-        headers = {'User-Agent': 'Mozilla/5.0', 'X-Requested-With': 'XMLHttpRequest'}
-        response = requests.get('https://www.dsebd.org/latest_share_price_scroll_l.php', headers=headers, timeout=10)
-        results['test_1_status'] = response.status_code
-        results['test_1_size'] = len(response.text)
+        response = session.get(
+            'https://www.dsebd.org/latest_share_price_scroll_l.php',
+            headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
+            timeout=15
+        )
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        tables = soup.find_all('table')
-        results['test_1_tables'] = len(tables)
-        
-        if tables:
-            rows = tables[0].find_all('tr')
-            results['test_1_rows'] = len(rows)
-            if rows:
-                cols = rows[0].find_all('td')
-                results['test_1_first_row_cols'] = len(cols)
-                if len(cols) > 3:
-                    results['test_1_first_row_data'] = [col.get_text(strip=True)[:30] for col in cols[:5]]
-    except Exception as e:
-        results['test_1_error'] = str(e)
-    
-    # টেস্ট ২: LTP পেজ
-    try:
-        response = requests.get('https://www.dsebd.org/latest_share_price_scroll_by_ltp.php', 
-                               headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        results['test_2_status'] = response.status_code
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        tables = soup.find_all('table')
-        results['test_2_tables'] = len(tables)
-        
-        if tables:
-            for i, table in enumerate(tables[:3]):
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # টেবিল খুঁজি
+            tables = soup.find_all('table', {'class': 'table'})
+            if not tables:
+                tables = soup.find_all('table')
+            
+            for table in tables:
                 rows = table.find_all('tr')
-                results[f'test_2_table_{i}_rows'] = len(rows)
+                for row in rows:
+                    cols = row.find_all('td')
+                    if len(cols) >= 8:
+                        try:
+                            # সিম্বল (২য় কলাম)
+                            symbol_link = cols[1].find('a') if len(cols) > 1 else None
+                            symbol = symbol_link.text.strip() if symbol_link else cols[1].get_text(strip=True) if len(cols) > 1 else None
+                            
+                            # LTP (৪র্থ কলাম)
+                            ltp_text = cols[3].get_text(strip=True).replace(',', '') if len(cols) > 3 else None
+                            
+                            if symbol and ltp_text and len(symbol) >= 2 and symbol[0].isalpha():
+                                try:
+                                    ltp = float(ltp_text)
+                                    if 0.1 < ltp < 50000:
+                                        ltp_data[symbol.upper()] = ltp
+                                except ValueError:
+                                    continue
+                        except:
+                            continue
+                    
+                    if len(ltp_data) > 300:  # 300+ সিম্বল পেলেই ব্রেক
+                        break
+                
+                if len(ltp_data) > 300:
+                    break
+        
+        if ltp_data:
+            result = {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api"}
+            ltp_cache["data"] = result
+            ltp_cache["timestamp"] = get_bd_time()
+            return result
+            
     except Exception as e:
-        results['test_2_error'] = str(e)
-    
-    results['bangladesh_time'] = get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
-    results['market_open'] = is_dse_market_open()
-    
-    return results
+        print(f"[LTP] Method 1 failed: {e}")
+
+    # পদ্ধতি ২: LTP পেজ থেকে সরাসরি স্ক্র্যাপিং
+    try:
+        # প্রথমে হোম পেজ ভিজিট (কুকি সেট)
+        try:
+            session.get('https://www.dsebd.org/', timeout=10)
+            time.sleep(1.5)
+        except:
+            pass
+        
+        response = session.get(
+            'https://www.dsebd.org/latest_share_price_scroll_by_ltp.php',
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            for table in soup.find_all('table'):
+                rows = table.find_all('tr')
+                for row in rows:
+                    cols = row.find_all('td')
+                    if len(cols) >= 11:  # LTP টেবিলে ১১টি কলাম
+                        try:
+                            # সিম্বল
+                            symbol_elem = cols[1].find('a') if len(cols) > 1 else None
+                            symbol = symbol_elem.text.strip() if symbol_elem else cols[1].get_text(strip=True) if len(cols) > 1 else None
+                            
+                            # LTP (৬ষ্ঠ কলাম - ক্লোজ প্রাইস)
+                            ltp_text = cols[5].get_text(strip=True).replace(',', '') if len(cols) > 5 else None
+                            
+                            if symbol and ltp_text and len(symbol) >= 2:
+                                try:
+                                    ltp = float(ltp_text)
+                                    if 0.1 < ltp < 50000:
+                                        ltp_data[symbol.upper()] = ltp
+                                except ValueError:
+                                    continue
+                        except:
+                            continue
+                
+                if len(ltp_data) > 100:
+                    break
+        
+        if ltp_data:
+            result = {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "html_table"}
+            ltp_cache["data"] = result
+            ltp_cache["timestamp"] = get_bd_time()
+            return result
+            
+    except Exception as e:
+        print(f"[LTP] Method 2 failed: {e}")
+
+    # সব পদ্ধতি ব্যর্থ
+    return {
+        "status": "error",
+        "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি",
+        "ltp_data": {},
+        "source": "none"
+    }
+
 # ================================
 # FIXED: ALL collections use analysis_date
 # ================================
