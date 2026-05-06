@@ -8,6 +8,7 @@ create_dashboard.py
 ✅ Trade Management Modal with Entry/SL/TP/Exposure/Risk%
 ✅ Auto-calculated RRR column in all tabs
 ✅ UptimeRobot HEAD endpoint
+✅ LTP > High Breakout Row Highlight (GREEN)
 """
 
 import os
@@ -19,12 +20,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from datetime import datetime, timedelta, timezone
 import re
+import time
 
 MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="13.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="14.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -95,7 +97,6 @@ async def market_status():
     }
     
 
-
 # LTP Cache
 ltp_cache = {"data": {}, "timestamp": None}
 
@@ -137,7 +138,6 @@ async def get_dse_ltp():
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # টেবিল খুঁজি
             tables = soup.find_all('table', {'class': 'table'})
             if not tables:
                 tables = soup.find_all('table')
@@ -148,11 +148,9 @@ async def get_dse_ltp():
                     cols = row.find_all('td')
                     if len(cols) >= 8:
                         try:
-                            # সিম্বল (২য় কলাম)
                             symbol_link = cols[1].find('a') if len(cols) > 1 else None
                             symbol = symbol_link.text.strip() if symbol_link else cols[1].get_text(strip=True) if len(cols) > 1 else None
                             
-                            # LTP (৪র্থ কলাম)
                             ltp_text = cols[2].get_text(strip=True).replace(',', '') if len(cols) > 3 else None
                             
                             if symbol and ltp_text and len(symbol) >= 2 and symbol[0].isalpha():
@@ -165,7 +163,7 @@ async def get_dse_ltp():
                         except:
                             continue
                     
-                    if len(ltp_data) > 300:  # 300+ সিম্বল পেলেই ব্রেক
+                    if len(ltp_data) > 300:
                         break
                 
                 if len(ltp_data) > 300:
@@ -182,7 +180,6 @@ async def get_dse_ltp():
 
     # পদ্ধতি ২: LTP পেজ থেকে সরাসরি স্ক্র্যাপিং
     try:
-        # প্রথমে হোম পেজ ভিজিট (কুকি সেট)
         try:
             session.get('https://www.dsebd.org/', timeout=10)
             time.sleep(1.5)
@@ -201,13 +198,11 @@ async def get_dse_ltp():
                 rows = table.find_all('tr')
                 for row in rows:
                     cols = row.find_all('td')
-                    if len(cols) >= 11:  # LTP টেবিলে ১১টি কলাম
+                    if len(cols) >= 11:
                         try:
-                            # সিম্বল
                             symbol_elem = cols[1].find('a') if len(cols) > 1 else None
                             symbol = symbol_elem.text.strip() if symbol_elem else cols[1].get_text(strip=True) if len(cols) > 1 else None
                             
-                            # LTP (৬ষ্ঠ কলাম - ক্লোজ প্রাইস)
                             ltp_text = cols[5].get_text(strip=True).replace(',', '') if len(cols) > 5 else None
                             
                             if symbol and ltp_text and len(symbol) >= 2:
@@ -232,7 +227,6 @@ async def get_dse_ltp():
     except Exception as e:
         print(f"[LTP] Method 2 failed: {e}")
 
-    # সব পদ্ধতি ব্যর্থ
     return {
         "status": "error",
         "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি",
@@ -281,7 +275,6 @@ async def get_dates(collection: str = Query("daily_ai_signals")):
 
     dates_set = set()
 
-    # analysis_date
     try:
         for d in col.distinct('analysis_date'):
             if d:
@@ -289,7 +282,6 @@ async def get_dates(collection: str = Query("daily_ai_signals")):
                 elif isinstance(d, str) and re.match(r'\d{4}-\d{2}-\d{2}', d.strip()): dates_set.add(d.strip())
     except: pass
 
-    # saved_at
     try:
         for doc in col.find({'saved_at': {'$exists': True}}, {'saved_at': 1}).limit(2000):
             val = doc.get('saved_at', '')
@@ -391,7 +383,6 @@ async def delete_signal(collection: str = Query("daily_ai_signals"), symbol: str
 
 @app.delete("/api/delete-all-by-date")
 async def delete_all_by_date(collection: str = Query(...), date: str = Query(...)):
-    """Delete ALL records for a specific date in a collection"""
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     result1 = col.delete_many({'analysis_date': date})
@@ -424,20 +415,17 @@ async def update_trade(
     if total_exposure is not None: update_fields['total_exposure'] = total_exposure
     if risk_percent is not None: update_fields['risk_percent'] = risk_percent
     
-    # Auto-calculate risk/reward ratio
     if entry_price and stop_loss and target_price:
         risk = abs(entry_price - stop_loss)
         reward = abs(target_price - entry_price)
         if risk > 0:
             update_fields['risk_reward_ratio'] = round(reward / risk, 2)
     
-    # Try update with analysis_date first
     result = col.update_one(
         {'symbol': symbol, 'analysis_date': date}, 
         {'$set': update_fields}
     )
     
-    # If not found, try with saved_at
     if result.matched_count == 0:
         result = col.update_one(
             {'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}}, 
@@ -510,6 +498,11 @@ async def dashboard():
         @keyframes ltpBlink { 0%,100% { background: #ff475730; } 50% { background: #ff475760; } }
         .ltp-above { color: #00ff88 !important; font-weight: bold; }
         .ltp-below { color: #ff4757 !important; font-weight: bold; }
+        /* ✅ NEW: LTP > High Breakout */
+        .ltp-break-high { background: linear-gradient(90deg, #00ff8818, #0a0a0f) !important; border-left: 4px solid #00ff88 !important; animation: highBreakPulse 2s infinite; }
+        @keyframes highBreakPulse { 0%,100% { background: #00ff8810; } 50% { background: #00ff8825; } }
+        .ltp-break-badge { background: #00ff88; color: #000; padding: 2px 6px; border-radius: 10px; font-size: 0.7em; margin-left: 5px; font-weight: bold; animation: badgePulse 1s infinite; }
+        @keyframes badgePulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
         .rrr-high { color: #00ff88; font-weight: bold; }
         .rrr-medium { color: #ffd700; }
         .rrr-low { color: #ff4757; }
@@ -637,13 +630,13 @@ async def dashboard():
         setInterval(loadDseLtp, 60000);
 
         function loadAlertRules() {
-            const saved = localStorage.getItem('ltpAlertRules_v27');
+            const saved = localStorage.getItem('ltpAlertRules_v28');
             if (saved) { try { alertRules = JSON.parse(saved); } catch(e) { alertRules = []; } }
             updateAlertUI();
         }
         
         function saveAlertRules() { 
-            localStorage.setItem('ltpAlertRules_v27', JSON.stringify(alertRules)); 
+            localStorage.setItem('ltpAlertRules_v28', JSON.stringify(alertRules)); 
             updateAlertUI(); 
             renderCurrentTab(); 
         }
@@ -672,7 +665,7 @@ async def dashboard():
             try { 
                 const r = await fetch('/api/dse-ltp'); 
                 const j = await r.json();
-                if (j.status === 'live') {
+                if (j.status === 'live' || j.status === 'cached') {
                     dseLtpData = j.ltp_data || {};
                 } else if (j.status === 'closed') {
                     dseLtpData = {};
@@ -758,14 +751,42 @@ async def dashboard():
             return null;
         }
 
-        function getLtpDisplay(symbol) {
+        // ✅ NEW: Check LTP > High
+        function isLtpAboveHigh(symbol, highPrice) {
+            const ltp = dseLtpData[symbol] || null;
+            if (!ltp || !highPrice || highPrice <= 0) return false;
+            return ltp > highPrice;
+        }
+
+        // ✅ UPDATED: LTP Display with High Break detection
+        function getLtpDisplay(symbol, highPrice) {
             const ltp = dseLtpData[symbol] || null;
             const alertStatus = getLtpAlertStatus(symbol);
             if (!ltp) return '<span style="color:#888;">-</span>';
             let cls = '', arrow = '';
-            if (alertStatus === 'above') { cls = 'ltp-above'; arrow = ' ↑'; }
-            else if (alertStatus === 'below') { cls = 'ltp-below'; arrow = ' ↓'; }
+            
+            if (highPrice && ltp > highPrice) {
+                cls = 'ltp-above';
+                arrow = ' 🚀';
+            } else if (alertStatus === 'above') { 
+                cls = 'ltp-above'; 
+                arrow = ' ↑'; 
+            } else if (alertStatus === 'below') { 
+                cls = 'ltp-below'; 
+                arrow = ' ↓'; 
+            }
+            
             return `<span class="${cls}" style="font-weight:bold;">${ltp.toFixed(2)}${arrow}</span>`;
+        }
+
+        // ✅ NEW: Get row class with High Break priority
+        function getRowClass(symbol, highPrice) {
+            const alertStatus = getLtpAlertStatus(symbol);
+            const ltpBreakHigh = isLtpAboveHigh(symbol, highPrice);
+            
+            if (ltpBreakHigh) return 'ltp-break-high';
+            if (alertStatus === 'above' || alertStatus === 'below') return 'ltp-alert-row';
+            return '';
         }
 
         function getRRRClass(rrr) {
@@ -813,7 +834,6 @@ async def dashboard():
             
             currentTradeSymbol = symbol;
             
-            // Load existing trade data if available
             const record = currentData.find(r => r.symbol === symbol);
             if (record) {
                 document.getElementById('tradeEntryPrice').value = record.entry_price || '';
@@ -876,7 +896,6 @@ async def dashboard():
             const exposure = parseFloat(document.getElementById('tradeTotalExposure').value) || 0;
             const riskPct = parseFloat(document.getElementById('tradeRiskPercent').value) || 0;
             
-            // Find record date
             const record = currentData.find(r => r.symbol === symbol);
             const date = record ? (record.analysis_date || record.date || '') : '';
             
@@ -1019,9 +1038,14 @@ async def dashboard():
                 const isEditing = editingRow && editingRow.symbol === r.symbol && editingRow.date === r.analysis_date;
                 const isEdited = r.edited === true;
                 const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
-                const ltpDisplay = getLtpDisplay(r.symbol);
+                
+                // ✅ HIGH: try multiple field names
+                const highPrice = r.high || r.current_high || r.breakout_high || r.last_high || 0;
+                
+                const ltpDisplay = getLtpDisplay(r.symbol, highPrice);
                 const alertStatus = getLtpAlertStatus(r.symbol);
-                const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
+                const ltpBreakHigh = isLtpAboveHigh(r.symbol, highPrice);
+                const rowClass = getRowClass(r.symbol, highPrice);
                 
                 const rrr = r.risk_reward_ratio || 0;
                 const rrrClass = getRRRClass(rrr);
@@ -1034,8 +1058,11 @@ async def dashboard():
                     ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>`
                     : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}')">🗑️</button>`;
                 
-                html += `<tr class="${alertRowClass}">
-                    <td>${i+1}</td><td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}</strong></td>
+                // ✅ LTP Break High Badge
+                const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
+                
+                html += `<tr class="${rowClass}">
+                    <td>${i+1}</td><td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
                     <td>${r.analysis_date||''}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${ltpDisplay}</td>
                     <td>${r.sector||''}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
                     <td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td>
@@ -1082,16 +1109,21 @@ async def dashboard():
             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
-                const ltpDisplay = getLtpDisplay(r.symbol);
+                // ✅ HIGH: try multiple field names
+                const highPrice = r.high || r.daily_last_high || r.weekly_curr_high || 0;
+                
+                const ltpDisplay = getLtpDisplay(r.symbol, highPrice);
                 const alertStatus = getLtpAlertStatus(r.symbol);
-                const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
+                const ltpBreakHigh = isLtpAboveHigh(r.symbol, highPrice);
+                const rowClass = getRowClass(r.symbol, highPrice);
                 const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
                 const rrr = r.risk_reward_ratio || 0;
                 const rrrClass = getRRRClass(rrr);
                 const recordDate = r.analysis_date || r.date || '';
+                const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
-                html += `<tr class="${alertRowClass}">
-                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}</strong></td><td>${r.sector || ''}</td>
+                html += `<tr class="${rowClass}">
+                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td><td>${r.sector || ''}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
                     <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
@@ -1130,17 +1162,22 @@ async def dashboard():
             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
-                const ltpDisplay = getLtpDisplay(r.symbol);
+                // ✅ HIGH: try multiple field names
+                const highPrice = r.high || r.current_high || r.breakout_high || r.last_high || 0;
+                
+                const ltpDisplay = getLtpDisplay(r.symbol, highPrice);
                 const alertStatus = getLtpAlertStatus(r.symbol);
-                const alertRowClass = (alertStatus === 'above' || alertStatus === 'below') ? 'ltp-alert-row' : '';
+                const ltpBreakHigh = isLtpAboveHigh(r.symbol, highPrice);
+                const rowClass = getRowClass(r.symbol, highPrice);
                 const recordDate = r.analysis_date || r.date || r.level_date || (r.saved_at||'').substring(0,10) || '';
                 const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
                 const rrr = r.risk_reward_ratio || 0;
                 const rrrClass = getRRRClass(rrr);
+                const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
-                html += `<tr class="${alertRowClass}">
+                html += `<tr class="${rowClass}">
                     <td>${i+1}</td>
-                    <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}</strong></td>
+                    <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
                     <td>${ltpDisplay}</td>
                     ${keys.map(k => `<td>${r[k]??''}</td>`).join('')}
                     <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
