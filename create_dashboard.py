@@ -2,7 +2,7 @@
 create_dashboard.py
 ✅ All Tabs with LTP + No Duplicate Date
 ✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
-✅ AI Signals (37 cols) + SWRSI + S/R + MACD + EMA 200 + Daily Buy
+✅ AI Signals (37 cols) + SWRSI + S/R + MACD + EMA 21 + Daily Buy
 ✅ S/R date selector FIXED (uses analysis_date like all other tabs)
 ✅ LTP Alert Modal + Delete All + Edit buttons
 ✅ Trade Management Modal with Entry/SL/TP/Exposure/Risk%
@@ -26,7 +26,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="14.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="15.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -498,7 +498,6 @@ async def dashboard():
         @keyframes ltpBlink { 0%,100% { background: #ff475730; } 50% { background: #ff475760; } }
         .ltp-above { color: #00ff88 !important; font-weight: bold; }
         .ltp-below { color: #ff4757 !important; font-weight: bold; }
-        /* ✅ NEW: LTP > High Breakout */
         .ltp-break-high { background: linear-gradient(90deg, #00ff8818, #0a0a0f) !important; border-left: 4px solid #00ff88 !important; animation: highBreakPulse 2s infinite; }
         @keyframes highBreakPulse { 0%,100% { background: #00ff8810; } 50% { background: #00ff8825; } }
         .ltp-break-badge { background: #00ff88; color: #000; padding: 2px 6px; border-radius: 10px; font-size: 0.7em; margin-left: 5px; font-weight: bold; animation: badgePulse 1s infinite; }
@@ -531,7 +530,7 @@ async def dashboard():
         <div class="tab" onclick="switchTab('swrsi')">🔍 SWRSI</div>
         <div class="tab" onclick="switchTab('support')">📊 S/R</div>
         <div class="tab" onclick="switchTab('macd')">📉 MACD</div>
-        <div class="tab" onclick="switchTab('ema')">📈 EMA 200</div>
+        <div class="tab" onclick="switchTab('ema')">📈 EMA 21</div>
         <div class="tab" onclick="switchTab('buy')">✅ Daily Buy</div>
     </div>
     <div class="controls" id="allControls">
@@ -617,7 +616,7 @@ async def dashboard():
             swrsi: 'swrsi_signals', 
             support: 'support_resistance', 
             macd: 'macd_signals', 
-            ema: 'ema_200_signals', 
+            ema: 'ema_21_signals', 
             buy: 'daily_buy_signals' 
         };
 
@@ -702,7 +701,7 @@ async def dashboard():
                 const r = await fetch(url); const j = await r.json();
                 currentData = j.signals || [];
             } else {
-                const map = { support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
+                const map = { support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
                 let url = `/api/generic-data?collection=${map[currentTab]}&limit=500`;
                 if (date) url += `&date=${date}`;
                 if (symbol) url += `&symbol=${symbol}`;
@@ -723,7 +722,7 @@ async def dashboard():
             event.target.classList.add('active');
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
+            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
             loadDates(map[t]);
             loadCurrentTab();
         }
@@ -751,14 +750,12 @@ async def dashboard():
             return null;
         }
 
-        // ✅ NEW: Check LTP > High
         function isLtpAboveHigh(symbol, highPrice) {
             const ltp = dseLtpData[symbol] || null;
             if (!ltp || !highPrice || highPrice <= 0) return false;
             return ltp > highPrice;
         }
 
-        // ✅ UPDATED: LTP Display with High Break detection
         function getLtpDisplay(symbol, highPrice) {
             const ltp = dseLtpData[symbol] || null;
             const alertStatus = getLtpAlertStatus(symbol);
@@ -779,7 +776,6 @@ async def dashboard():
             return `<span class="${cls}" style="font-weight:bold;">${ltp.toFixed(2)}${arrow}</span>`;
         }
 
-        // ✅ NEW: Get row class with High Break priority
         function getRowClass(symbol, highPrice) {
             const alertStatus = getLtpAlertStatus(symbol);
             const ltpBreakHigh = isLtpAboveHigh(symbol, highPrice);
@@ -1012,7 +1008,7 @@ async def dashboard():
 
         async function deleteRecord(symbol, date, tab = 'ai_signals') {
             if (!confirm(`Delete ${symbol}?`)) return;
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_200_signals', buy: 'daily_buy_signals' };
+            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
             await fetch(`/api/delete-signal?collection=${map[tab]}&symbol=${symbol}&date=${date}`, { method: 'DELETE' });
             loadCurrentTab();
         }
@@ -1039,7 +1035,6 @@ async def dashboard():
                 const isEdited = r.edited === true;
                 const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
                 
-                // ✅ HIGH: try multiple field names
                 const highPrice = r.high || r.current_high || r.breakout_high || r.last_high || 0;
                 
                 const ltpDisplay = getLtpDisplay(r.symbol, highPrice);
@@ -1058,7 +1053,6 @@ async def dashboard():
                     ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>`
                     : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}')">🗑️</button>`;
                 
-                // ✅ LTP Break High Badge
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
                 html += `<tr class="${rowClass}">
@@ -1109,7 +1103,6 @@ async def dashboard():
             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
-                // ✅ HIGH: try multiple field names
                 const highPrice = r.high || r.daily_last_high || r.weekly_curr_high || 0;
                 
                 const ltpDisplay = getLtpDisplay(r.symbol, highPrice);
@@ -1162,7 +1155,6 @@ async def dashboard():
             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
-                // ✅ HIGH: try multiple field names
                 const highPrice = r.high || r.current_high || r.breakout_high || r.last_high || 0;
                 
                 const ltpDisplay = getLtpDisplay(r.symbol, highPrice);
