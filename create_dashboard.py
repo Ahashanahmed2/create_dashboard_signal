@@ -9,6 +9,7 @@ create_dashboard.py
 ✅ Auto-calculated RRR column in all tabs
 ✅ UptimeRobot HEAD endpoint
 ✅ LTP > High Breakout Row Highlight (GREEN)
+✅ Default Sort: diff ASC, gape DESC
 """
 
 import os
@@ -26,7 +27,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="15.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="16.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_mongo_collection(collection_name=None):
@@ -300,7 +301,15 @@ async def get_swrsi_dates():
     return sorted(dates, reverse=True)
 
 @app.get("/api/signals")
-async def get_signals(date: str = Query(None), signal: str = Query(None), symbol: str = Query(None), min_score: float = Query(0), limit: int = Query(1000)):
+async def get_signals(
+    date: str = Query(None), 
+    signal: str = Query(None), 
+    symbol: str = Query(None), 
+    min_score: float = Query(0), 
+    limit: int = Query(1000),
+    sort_by: str = Query(None),
+    sort_order: str = Query("asc")
+):
     collection = get_mongo_collection()
     if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
 
@@ -316,11 +325,29 @@ async def get_signals(date: str = Query(None), signal: str = Query(None), symbol
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
     if min_score > 0: query['final_combined_score'] = {'$gte': min_score}
 
-    cursor = collection.find(query, {'_id': 0}).sort('final_combined_score', -1).limit(limit)
+    # Default sorting
+    sort_criteria = []
+    if sort_by:
+        sort_dir = -1 if sort_order == "desc" else 1
+        sort_criteria.append((sort_by, sort_dir))
+    else:
+        # Default: diff ASC (low to high), gape DESC (high to low)
+        sort_criteria = [('diff', 1), ('gape', -1)]
+    
+    cursor = collection.find(query, {'_id': 0})
+    if sort_criteria:
+        cursor = cursor.sort(sort_criteria)
+    cursor = cursor.limit(limit)
+    
     return {"data": list(cursor)}
 
 @app.get("/api/swrsi")
-async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
+async def get_swrsi(
+    date: str = Query(None), 
+    symbol: str = Query(None),
+    sort_by: str = Query(None),
+    sort_order: str = Query("asc")
+):
     col = get_mongo_collection("swrsi_signals")
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
 
@@ -333,7 +360,21 @@ async def get_swrsi(date: str = Query(None), symbol: str = Query(None)):
             query = build_date_query(latest_date)
 
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    data = list(col.find(query, {'_id': 0}).sort('composite_score', -1))
+    
+    # Default sorting
+    sort_criteria = []
+    if sort_by:
+        sort_dir = -1 if sort_order == "desc" else 1
+        sort_criteria.append((sort_by, sort_dir))
+    else:
+        # Default: diff ASC, gape DESC
+        sort_criteria = [('diff', 1), ('gape', -1)]
+    
+    cursor = col.find(query, {'_id': 0})
+    if sort_criteria:
+        cursor = cursor.sort(sort_criteria)
+    
+    data = list(cursor)
     all_dates = sorted(col.distinct('analysis_date'), reverse=True)
     return {"signals": data, "total_signals": len(data), "available_dates": all_dates}
 
@@ -356,7 +397,14 @@ async def get_stats(date: str = Query(None)):
     return {"total": 0, "avg_score": 0}
 
 @app.get("/api/generic-data")
-async def get_generic_data(collection: str = Query(...), date: str = Query(None), symbol: str = Query(None), limit: int = Query(500)):
+async def get_generic_data(
+    collection: str = Query(...), 
+    date: str = Query(None), 
+    symbol: str = Query(None), 
+    limit: int = Query(500),
+    sort_by: str = Query(None),
+    sort_order: str = Query("asc")
+):
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
 
@@ -369,7 +417,21 @@ async def get_generic_data(collection: str = Query(...), date: str = Query(None)
             query = build_date_query(latest_date)
 
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    data = list(col.find(query, {'_id': 0}).limit(limit))
+    
+    # Default sorting
+    sort_criteria = []
+    if sort_by:
+        sort_dir = -1 if sort_order == "desc" else 1
+        sort_criteria.append((sort_by, sort_dir))
+    else:
+        # Default: diff ASC, gape DESC
+        sort_criteria = [('diff', 1), ('gape', -1)]
+    
+    cursor = col.find(query, {'_id': 0})
+    if sort_criteria:
+        cursor = cursor.sort(sort_criteria)
+    data = list(cursor.limit(limit))
+    
     return {"data": data}
 
 @app.delete("/api/delete-signal")
@@ -480,7 +542,10 @@ async def dashboard():
         .alert-config-btn { background: #ffa500; color: #000; font-weight: bold; }
         .trade-btn { background: #00cc66; color: #000; font-weight: bold; margin-left: auto; }
         table { width: 100%; border-collapse: collapse; font-size: 0.7em; background: #111122; border-radius: 10px; overflow: hidden; }
-        th { background: #1a1a2e; padding: 10px 5px; color: #00d4ff; white-space: nowrap; }
+        th { background: #1a1a2e; padding: 10px 5px; color: #00d4ff; white-space: nowrap; cursor: pointer; user-select: none; }
+        th:hover { background: #1e1e38; }
+        th.sorted { color: #ffa500; }
+        .sort-indicator { font-size: 0.8em; margin-left: 3px; }
         td { padding: 5px; border-bottom: 1px solid #222; white-space: nowrap; }
         .edit-btn { background: #ffa500; color: #000; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
         .delete-btn { background: #ff4757; color: #fff; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
@@ -542,6 +607,7 @@ async def dashboard():
         <button class="alert-config-btn" onclick="openAlertModal()">🔔 Alerts</button>
         <button class="delete-all-btn" onclick="deleteAllByDate()">🗑️ Delete All</button>
         <button class="trade-btn" onclick="openTradeModal()">💰 Trade</button>
+        <button onclick="resetSort()" style="background:#555;">↺ Reset Sort</button>
         <span id="recordCount" style="color:#888;"></span>
     </div>
     
@@ -601,6 +667,7 @@ async def dashboard():
     </div>
     
     <div id="alertStatusBar" style="background:#0f3460;padding:6px 12px;border-radius:6px;margin-bottom:8px;display:none;color:#ffa500;font-size:0.8em;"></div>
+    <div id="sortStatus" style="background:#1a1a2e;padding:6px 12px;border-radius:6px;margin-bottom:8px;color:#00d4ff;font-size:0.8em;"></div>
     <div style="overflow-x:auto;" id="dynamicTable"></div>
 
     <script>
@@ -610,6 +677,10 @@ async def dashboard():
         let editingRow = null;
         let alertRules = [];
         let currentTradeSymbol = null;
+        
+        // Sorting state
+        let currentSort = { field: null, order: null };
+        let defaultSort = { diff: 'asc', gape: 'desc' };
 
         const COLLECTION_MAP = { 
             ai_signals: 'daily_ai_signals', 
@@ -627,15 +698,16 @@ async def dashboard():
         loadAlertRules();
         setInterval(checkMarketStatus, 60000);
         setInterval(loadDseLtp, 60000);
+        updateSortStatus();
 
         function loadAlertRules() {
-            const saved = localStorage.getItem('ltpAlertRules_v28');
+            const saved = localStorage.getItem('ltpAlertRules_v30');
             if (saved) { try { alertRules = JSON.parse(saved); } catch(e) { alertRules = []; } }
             updateAlertUI();
         }
         
         function saveAlertRules() { 
-            localStorage.setItem('ltpAlertRules_v28', JSON.stringify(alertRules)); 
+            localStorage.setItem('ltpAlertRules_v30', JSON.stringify(alertRules)); 
             updateAlertUI(); 
             renderCurrentTab(); 
         }
@@ -649,6 +721,48 @@ async def dashboard():
             } else {
                 bar.style.display = 'none';
             }
+        }
+
+        function updateSortStatus() {
+            const statusDiv = document.getElementById('sortStatus');
+            if (currentSort.field) {
+                statusDiv.innerHTML = '📊 <strong>Sorted by:</strong> ' + currentSort.field + ' (' + currentSort.order.toUpperCase() + ') | <span style="cursor:pointer;color:#ffa500;" onclick="resetSort()">↺ Reset to Default</span>';
+                statusDiv.style.display = 'block';
+            } else {
+                statusDiv.innerHTML = '📊 <strong>Default Sort:</strong> diff ASC (↓low first), gape DESC (↑high first)';
+                statusDiv.style.display = 'block';
+            }
+        }
+
+        function handleSort(field) {
+            if (currentSort.field === field) {
+                // Toggle order
+                currentSort.order = currentSort.order === 'asc' ? 'desc' : 'asc';
+            } else {
+                // New field - start with asc for diff, desc for gape
+                currentSort.field = field;
+                currentSort.order = (field === 'diff') ? 'asc' : (field === 'gape' ? 'desc' : 'asc');
+            }
+            updateSortStatus();
+            loadCurrentTab();
+        }
+
+        function resetSort() {
+            currentSort = { field: null, order: null };
+            updateSortStatus();
+            loadCurrentTab();
+        }
+
+        function getSortIndicator(field) {
+            if (currentSort.field === field) {
+                return '<span class="sort-indicator">' + (currentSort.order === 'asc' ? '▲' : '▼') + '</span>';
+            }
+            // Show default indicators
+            if (!currentSort.field) {
+                if (field === 'diff') return '<span class="sort-indicator" style="color:#ffa500;">▲</span>';
+                if (field === 'gape') return '<span class="sort-indicator" style="color:#ffa500;">▼</span>';
+            }
+            return '<span class="sort-indicator" style="opacity:0.3;">⇅</span>';
         }
 
         async function checkMarketStatus() {
@@ -688,21 +802,26 @@ async def dashboard():
         async function loadCurrentTab() {
             const date = document.getElementById('dateSelect').value;
             const symbol = document.getElementById('symbolSearch').value;
+            let sortParam = '';
+            if (currentSort.field) {
+                sortParam = `&sort_by=${currentSort.field}&sort_order=${currentSort.order}`;
+            }
+            // Default sorting is handled by API (diff ASC, gape DESC)
             
             if (currentTab === 'ai_signals') {
-                let url = `/api/signals?date=${date}&limit=1000`;
+                let url = `/api/signals?date=${date}&limit=1000${sortParam}`;
                 if (symbol) url += `&symbol=${symbol}`;
                 const r = await fetch(url); const j = await r.json();
                 currentData = j.data || [];
             } else if (currentTab === 'swrsi') {
-                let url = '/api/swrsi?';
-                if (date) url += `date=${date}&`;
-                if (symbol) url += `symbol=${symbol}&`;
+                let url = `/api/swrsi?${sortParam}`;
+                if (date) url += `&date=${date}`;
+                if (symbol) url += `&symbol=${symbol}`;
                 const r = await fetch(url); const j = await r.json();
                 currentData = j.signals || [];
             } else {
                 const map = { support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
-                let url = `/api/generic-data?collection=${map[currentTab]}&limit=500`;
+                let url = `/api/generic-data?collection=${map[currentTab]}&limit=500${sortParam}`;
                 if (date) url += `&date=${date}`;
                 if (symbol) url += `&symbol=${symbol}`;
                 const r = await fetch(url); const j = await r.json();
@@ -1018,13 +1137,22 @@ async def dashboard():
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
             
             let html = `<table><thead><tr>
-                <th>#</th><th>Symbol</th><th>Date</th><th>Price</th><th>LTP</th><th>Sector</th>
-                <th>Signal</th><th>Score</th><th>LLM</th><th>LLM%</th><th>LLM Str</th>
+                <th>#</th>
+                <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
+                <th>Date</th>
+                <th onclick="handleSort('current_price')">Price${getSortIndicator('current_price')}</th>
+                <th>LTP</th>
+                <th>Sector</th>
+                <th onclick="handleSort('final_signal')">Signal${getSortIndicator('final_signal')}</th>
+                <th onclick="handleSort('final_combined_score')">Score${getSortIndicator('final_combined_score')}</th>
+                <th>LLM</th><th>LLM%</th><th>LLM Str</th>
                 <th>LLM Bias</th><th>LLM Av</th><th>XGB</th><th>XGB%</th><th>XGB Pr</th><th>AUC</th>
                 <th>XGB Av</th><th>PPO</th><th>PPO%</th><th>PPO Av</th><th>PPO Wt</th>
                 <th>Agentic</th><th>Ag Bias</th><th>Ag Av</th>
                 <th>E Acc</th><th>E Tot</th><th>E Wave</th><th>Sub-Wave</th>
                 <th>Cur Wave</th><th>W Conf</th><th>Bull?</th><th>W Pos</th>
+                <th onclick="handleSort('diff')">Diff${getSortIndicator('diff')}</th>
+                <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
             </tr></thead><tbody>`;
@@ -1074,6 +1202,8 @@ async def dashboard():
                     <td style="font-size:0.65em;max-width:100px;overflow:hidden;">${(r.elliott_sub_waves||'').substring(0,20)}</td>
                     <td>${r.elliott_current_wave||''}</td><td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
                     <td>${r.elliott_is_bullish ? '✅' : '❌'}</td><td>${r.elliott_wave_position||''}</td>
+                    <td style="color:#ffd700;font-weight:bold;">${r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-'}</td>
+                    <td style="color:#00d4ff;font-weight:bold;">${r.gape !== undefined ? r.gape.toFixed(2) : '-'}</td>
                     <td>${entryCell}</td><td>${slCell}</td><td>${tpCell}</td>
                     <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
                     <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
@@ -1091,13 +1221,18 @@ async def dashboard():
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
             
             let html = `<table><thead><tr>
-                <th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Composite Score</th>
+                <th>#</th>
+                <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
+                <th>Sector</th><th>LTP</th>
+                <th onclick="handleSort('composite_score')">Composite Score${getSortIndicator('composite_score')}</th>
                 <th>Weekly Div</th><th>Weekly Label</th><th>Weekly Score</th>
                 <th>Prev Low</th><th>Curr Low</th><th>Prev RSI</th><th>Curr RSI</th>
                 <th>Price Drop%</th><th>RSI Gain</th>
                 <th>Prev Week</th><th>Curr Week</th>
                 <th>Daily Div</th><th>Daily Strength</th>
                 <th>Daily Last RSI</th><th>Daily Prev RSI</th>
+                <th onclick="handleSort('diff')">Diff${getSortIndicator('diff')}</th>
+                <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
             </tr></thead><tbody>`;
@@ -1127,6 +1262,8 @@ async def dashboard():
                     <td>${r.weekly_prev_date || ''}</td><td>${r.weekly_curr_date || ''}</td>
                     <td>${r.daily_divergence_type || ''}</td><td>${r.daily_divergence_strength || ''}</td>
                     <td>${(r.daily_last_rsi || 0).toFixed(2)}</td><td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td style="color:#ffd700;font-weight:bold;">${r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-'}</td>
+                    <td style="color:#00d4ff;font-weight:bold;">${r.gape !== undefined ? r.gape.toFixed(2) : '-'}</td>
                     <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
                     <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
                     <td>${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
@@ -1148,8 +1285,15 @@ async def dashboard():
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             
             let html = `<table><thead><tr>
-                <th>#</th><th>Symbol</th><th>LTP</th>
-                ${keys.map(k => `<th>${k}</th>`).join('')}
+                <th>#</th>
+                <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
+                <th>LTP</th>
+                ${keys.map(k => {
+                    if (k === 'diff' || k === 'gape') {
+                        return `<th onclick="handleSort('${k}')">${k}${getSortIndicator(k)}</th>`;
+                    }
+                    return `<th>${k}</th>`;
+                }).join('')}
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
             </tr></thead><tbody>`;
@@ -1171,7 +1315,15 @@ async def dashboard():
                     <td>${i+1}</td>
                     <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
                     <td>${ltpDisplay}</td>
-                    ${keys.map(k => `<td>${r[k]??''}</td>`).join('')}
+                    ${keys.map(k => {
+                        if (k === 'diff') {
+                            return `<td style="color:#ffd700;font-weight:bold;">${r[k] !== undefined ? (r[k] > 0 ? '+' : '') + Number(r[k]).toFixed(2) : '-'}</td>`;
+                        }
+                        if (k === 'gape') {
+                            return `<td style="color:#00d4ff;font-weight:bold;">${r[k] !== undefined ? Number(r[k]).toFixed(2) : '-'}</td>`;
+                        }
+                        return `<td>${r[k]??''}</td>`;
+                    }).join('')}
                     <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
                     <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
                     <td>${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
