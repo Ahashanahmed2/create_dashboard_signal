@@ -164,10 +164,10 @@ async def get_dse_ltp():
                         except:
                             continue
                     
-                    if len(ltp_data) > 300:
+                    if len(ltp_data) > 400:
                         break
                 
-                if len(ltp_data) > 300:
+                if len(ltp_data) > 400:
                     break
         
         if ltp_data:
