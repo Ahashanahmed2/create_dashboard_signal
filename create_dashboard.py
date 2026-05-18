@@ -602,6 +602,10 @@ async def dashboard():
     <div class="header">
         <h1>🤖 AI Trading Signals Dashboard</h1>
         <p id="marketStatus">Checking DSE status...</p>
+        <button id="installBtn" onclick="installApp()" 
+            style="display:none; background:#00d4ff; color:#000; border:none; padding:10px 20px; border-radius:8px; cursor:pointer; font-weight:bold; margin-top:10px;">
+                📲 Install App
+        </button>
     </div>
     <div id="alertBox" class="alert-box">⚠️ DSE CLOSING IN 10 MINUTES!</div>
     <div class="tabs">
@@ -1359,6 +1363,33 @@ async def dashboard():
             onTradeSymbolChange();
             openTradeModal();
         }
+
+        // ==================== PWA Install ====================
+let deferredPrompt;
+
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    document.getElementById('installBtn').style.display = 'inline-block';
+});
+
+function installApp() {
+    if (deferredPrompt) {
+        deferredPrompt.prompt();
+        deferredPrompt.userChoice.then((choiceResult) => {
+            if (choiceResult.outcome === 'accepted') {
+                console.log('✅ User installed the app');
+            }
+            deferredPrompt = null;
+            document.getElementById('installBtn').style.display = 'none';
+        });
+    }
+}
+
+// Already installed check
+if (window.matchMedia('(display-mode: standalone)').matches) {
+    document.getElementById('installBtn').style.display = 'none';
+}
 
        if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
