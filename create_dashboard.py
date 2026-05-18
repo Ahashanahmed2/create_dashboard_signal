@@ -16,7 +16,7 @@ import os
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response,FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from datetime import datetime, timedelta, timezone
@@ -60,6 +60,11 @@ def is_dse_market_open():
 @app.api_route("/head", methods=["GET", "HEAD"])
 async def uptime_robot_head():
     return Response(content="OK", status_code=200, headers={"Cache-Control": "no-cache", "X-Health-Status": "healthy"})
+
+
+@app.get('/sw.js')
+async def service_worker():
+    return FileResponse('static/sw.js', media_type='application/javascript')
 
 @app.get("/api/health")
 async def health():
@@ -523,6 +528,13 @@ async def dashboard():
 <head>
     <meta charset="UTF-8">
     <title>🤖 AI Trading Signals</title>
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#00d4ff">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="AI Signals">
+    <link rel="icon" href="/static/icon-192.png">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1345,6 +1357,12 @@ async def dashboard():
             onTradeSymbolChange();
             openTradeModal();
         }
+
+       if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/sw.js');
+        });
+    }
     </script>
 </body>
 </html>
