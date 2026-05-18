@@ -29,6 +29,7 @@ COLLECTION_NAME = "daily_ai_signals"
 
 app = FastAPI(title="AI Trading Signals Dashboard", version="16.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 def get_mongo_collection(collection_name=None):
     if not MONGODB_URI: return None
