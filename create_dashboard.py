@@ -51,7 +51,7 @@ def get_bd_time():
 def is_dse_market_open():
     now = get_bd_time()
     hour, minute, weekday = now.hour, now.minute, now.weekday()
-    return (weekday in [6, 0, 1, 2, 3] and 
+    return (weekday in [6, 0, 1, 2, 3, 5] and 
             ((hour == 10 and minute >= 0) or 
              (10 < hour < 14) or 
              (hour == 14 and minute <= 20)))
