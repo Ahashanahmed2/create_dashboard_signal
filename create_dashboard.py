@@ -112,17 +112,31 @@ ltp_cache = {"data": {}, "timestamp": None}
 async def get_dse_ltp():
     """DSE থেকে LTP ডাটা ফেচ করুন - একাধিক ফলব্যাক সহ"""
     
-    # ক্যাশ চেক (2 মিনিট)
+    # ক্যাশ চেক (2 মিনিট) - শুধুমাত্র মার্কেট ওপেন থাকলে
     if ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
-        if age < 120 and ltp_cache["data"]:
-            return ltp_cache["data"]
-    
+        # মার্কেট খোলা থাকলে ২ মিনিটের ক্যাশ ব্যবহার করবে
+        if is_dse_market_open():
+            if age < 120 and ltp_cache["data"]:
+                return ltp_cache["data"]
+        # মার্কেট বন্ধ থাকলে ক্যাশ থেকেই ডাটা দিবে, বার বার ফেচ করবে না
+        else:
+            if ltp_cache["data"]:
+                return ltp_cache["data"]
+
+    # মার্কেট বন্ধ থাকলে এবং ক্যাশে ডাটা না থাকলে শুধুমাত্র একবার ফেচ করবে
     if not is_dse_market_open():
-        result = {"status": "closed", "ltp_data": {}, "message": "মার্কেট বন্ধ"}
-        ltp_cache["data"] = result
-        ltp_cache["timestamp"] = get_bd_time()
-        return result
+        # ক্যাশে ডাটা থাকলে সেটাই রিটার্ন করবে (উপরে চেক করা হয়েছে)
+        # ক্যাশে ডাটা না থাকলে একবার ফেচ করার চেষ্টা করবে
+        if ltp_cache["data"]:
+            result = ltp_cache["data"]
+            # মার্কেট বন্ধ স্ট্যাটাস আপডেট
+            if isinstance(result, dict):
+                result["status"] = "closed"
+            return result
+        else:
+            # ক্যাশে কিছুই নেই, একবার ফেচ করে নিবে
+            pass
 
     ltp_data = {}
     session = requests.Session()
@@ -178,7 +192,8 @@ async def get_dse_ltp():
                     break
         
         if ltp_data:
-            result = {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api"}
+            status = "live" if is_dse_market_open() else "closed"
+            result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api"}
             ltp_cache["data"] = result
             ltp_cache["timestamp"] = get_bd_time()
             return result
@@ -227,7 +242,8 @@ async def get_dse_ltp():
                     break
         
         if ltp_data:
-            result = {"status": "live", "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "html_table"}
+            status = "live" if is_dse_market_open() else "closed"
+            result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "html_table"}
             ltp_cache["data"] = result
             ltp_cache["timestamp"] = get_bd_time()
             return result
@@ -235,6 +251,8 @@ async def get_dse_ltp():
     except Exception as e:
         print(f"[LTP] Method 2 failed: {e}")
 
+    # কোনো ডাটা পাওয়া যায়নি
+    status = "live" if is_dse_market_open() else "closed"
     return {
         "status": "error",
         "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি",
@@ -715,7 +733,12 @@ async def dashboard():
         loadDseLtp();
         loadAlertRules();
         setInterval(checkMarketStatus, 60000);
-        setInterval(loadDseLtp, 60000);
+        // মার্কেট ওপেন থাকলে ৬০ সেকেন্ডে LTP ফেচ, বন্ধ থাকলে ফেচ করবে না
+        setInterval(() => {
+            fetch('/api/market-status').then(r => r.json()).then(s => {
+                if (s.is_open) loadDseLtp();
+            });
+        }, 60000);
         updateSortStatus();
 
         function loadAlertRules() {
@@ -796,10 +819,8 @@ async def dashboard():
             try { 
                 const r = await fetch('/api/dse-ltp'); 
                 const j = await r.json();
-                if (j.status === 'live' || j.status === 'cached') {
+                if (j.status === 'live' || j.status === 'closed' || j.status === 'cached') {
                     dseLtpData = j.ltp_data || {};
-                } else if (j.status === 'closed') {
-                    dseLtpData = {};
                 }
                 renderCurrentTab();
             } catch(e) {
