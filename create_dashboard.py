@@ -2,6 +2,7 @@
 create_dashboard.py
 ✅ All Tabs with LTP + No Duplicate Date
 ✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
+✅ DSE Website Market Status Check
 ✅ AI Signals (37 cols) + SWRSI + S/R + MACD + EMA 21 + Daily Buy
 ✅ S/R date selector FIXED (uses analysis_date like all other tabs)
 ✅ LTP Alert Modal + Delete All + Edit buttons
@@ -16,7 +17,7 @@ import os
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse, Response,FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pymongo import MongoClient
@@ -28,7 +29,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="16.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="17.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -48,13 +49,98 @@ BD_TIMEZONE = timezone(timedelta(hours=6))
 def get_bd_time():
     return datetime.now(BD_TIMEZONE)
 
-def is_dse_market_open():
+def is_dse_market_open_from_website():
+    """
+    DSE ওয়েবসাইট থেকে সরাসরি মার্কেট স্ট্যাটাস চেক করুন
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml'
+        }
+        
+        # প্রথমে DSE হোমপেজ চেক করুন
+        response = requests.get('https://www.dsebd.org/', headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Market Status খুঁজুন - সব এলিমেন্ট চেক করুন
+            all_elements = soup.find_all(['span', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'strong', 'b'])
+            
+            for element in all_elements:
+                text = element.get_text().strip().upper()
+                if 'MARKET STATUS' in text:
+                    if 'CLOSED' in text:
+                        return False
+                    elif 'OPEN' in text:
+                        return True
+                # আলাদাভাবে Closed/Open টেক্সট চেক করুন
+                if 'MARKET CLOSED' in text:
+                    return False
+                if 'MARKET OPEN' in text:
+                    return True
+            
+            # body tag এর ভিতরে সব টেক্সট চেক করুন
+            body = soup.find('body')
+            if body:
+                body_text = body.get_text().upper()
+                if 'MARKET STATUS: CLOSED' in body_text or 'MARKET CLOSED' in body_text:
+                    return False
+                if 'MARKET STATUS: OPEN' in body_text or 'MARKET OPEN' in body_text:
+                    return True
+        
+        # দ্বিতীয় চেষ্টা: DSE AJAX API চেক করুন - ট্রেডিং ডাটা আছে কিনা
+        try:
+            ajax_response = requests.get(
+                'https://www.dsebd.org/latest_share_price_scroll_l.php',
+                headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
+                timeout=10
+            )
+            
+            if ajax_response.status_code == 200:
+                soup = BeautifulSoup(ajax_response.text, 'html.parser')
+                tables = soup.find_all('table')
+                if tables:
+                    first_table = tables[0]
+                    rows = first_table.find_all('tr')
+                    # হেডার + ডাটা row থাকলে মার্কেট খোলা
+                    data_rows = [row for row in rows if row.find_all('td')]
+                    if len(data_rows) > 0:
+                        return True
+                    else:
+                        return False
+        except:
+            pass
+        
+        # ফলব্যাক: সময় চেক
+        return is_dse_market_open_by_time()
+                
+    except Exception as e:
+        print(f"DSE website check failed: {e}")
+        return is_dse_market_open_by_time()
+
+def is_dse_market_open_by_time():
+    """ফলব্যাক: সময় এবং দিন অনুযায়ী চেক"""
     now = get_bd_time()
     hour, minute, weekday = now.hour, now.minute, now.weekday()
-    return (weekday in [6, 0, 1, 2, 3, 4] and 
-            ((hour == 10 and minute >= 0) or 
-             (10 < hour < 14) or 
-             (hour == 14 and minute <= 20)))
+    
+    # সাপ্তাহিক ছুটি (শুক্রবার = 4)
+    if weekday == 4:
+        return False
+    
+    # ট্রেডিং সময় (রবি-বৃহস্পতি, 10:00-14:20)
+    if weekday in [6, 0, 1, 2, 3]:
+        if ((hour == 10 and minute >= 0) or 
+            (10 < hour < 14) or 
+            (hour == 14 and minute <= 20)):
+            return True
+    
+    return False
+
+# Backward compatibility
+def is_dse_market_open():
+    return is_dse_market_open_from_website()
 
 # ================================
 # API Routes
@@ -77,14 +163,14 @@ async def health():
         "status": "ok", 
         "mongodb": "connected" if col else "not configured",
         "swrsi_signals": swrsi_count,
-        "dse_market": "OPEN" if is_dse_market_open() else "CLOSED",
+        "dse_market": "OPEN" if is_dse_market_open_from_website() else "CLOSED",
         "bangladesh_time": get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
     }
 
 @app.get("/api/market-status")
 async def market_status():
     now = get_bd_time()
-    is_open = is_dse_market_open()
+    is_open = is_dse_market_open_from_website()
     close_time = now.replace(hour=14, minute=20, second=0, microsecond=0)
     time_to_close = (close_time - now).total_seconds()
     alert_10min = is_open and (0 < time_to_close <= 600)
@@ -101,7 +187,8 @@ async def market_status():
         "alert_10min": alert_10min,
         "alert_message": "⚠️ DSE CLOSING IN 10 MINUTES!" if alert_10min else "",
         "next_open": next_open,
-        "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S')
+        "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S'),
+        "source": "dse_website"
     }
     
 
@@ -116,7 +203,7 @@ async def get_dse_ltp():
     if ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
         # মার্কেট খোলা থাকলে ২ মিনিটের ক্যাশ ব্যবহার করবে
-        if is_dse_market_open():
+        if is_dse_market_open_from_website():
             if age < 120 and ltp_cache["data"]:
                 return ltp_cache["data"]
         # মার্কেট বন্ধ থাকলে ক্যাশ থেকেই ডাটা দিবে, বার বার ফেচ করবে না
@@ -125,7 +212,7 @@ async def get_dse_ltp():
                 return ltp_cache["data"]
 
     # মার্কেট বন্ধ থাকলে এবং ক্যাশে ডাটা না থাকলে শুধুমাত্র একবার ফেচ করবে
-    if not is_dse_market_open():
+    if not is_dse_market_open_from_website():
         # ক্যাশে ডাটা থাকলে সেটাই রিটার্ন করবে (উপরে চেক করা হয়েছে)
         # ক্যাশে ডাটা না থাকলে একবার ফেচ করার চেষ্টা করবে
         if ltp_cache["data"]:
@@ -192,7 +279,7 @@ async def get_dse_ltp():
                     break
         
         if ltp_data:
-            status = "live" if is_dse_market_open() else "closed"
+            status = "live" if is_dse_market_open_from_website() else "closed"
             result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api"}
             ltp_cache["data"] = result
             ltp_cache["timestamp"] = get_bd_time()
@@ -242,7 +329,7 @@ async def get_dse_ltp():
                     break
         
         if ltp_data:
-            status = "live" if is_dse_market_open() else "closed"
+            status = "live" if is_dse_market_open_from_website() else "closed"
             result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "html_table"}
             ltp_cache["data"] = result
             ltp_cache["timestamp"] = get_bd_time()
@@ -252,7 +339,7 @@ async def get_dse_ltp():
         print(f"[LTP] Method 2 failed: {e}")
 
     # কোনো ডাটা পাওয়া যায়নি
-    status = "live" if is_dse_market_open() else "closed"
+    status = "live" if is_dse_market_open_from_website() else "closed"
     return {
         "status": "error",
         "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি",
