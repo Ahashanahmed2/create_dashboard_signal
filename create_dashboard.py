@@ -2,7 +2,7 @@
 create_dashboard.py
 ✅ All Tabs with LTP + No Duplicate Date
 ✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
-✅ DSE Website Market Status Check
+✅ DSE Website Market Status Check - FIXED
 ✅ AI Signals (37 cols) + SWRSI + S/R + MACD + EMA 21 + Daily Buy
 ✅ S/R date selector FIXED (uses analysis_date like all other tabs)
 ✅ LTP Alert Modal + Delete All + Edit buttons
@@ -29,7 +29,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="17.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="18.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -49,98 +49,219 @@ BD_TIMEZONE = timezone(timedelta(hours=6))
 def get_bd_time():
     return datetime.now(BD_TIMEZONE)
 
-def is_dse_market_open_from_website():
+# ================================
+# DSE WEBSITE MARKET STATUS - FIXED VERSION
+# ================================
+def is_dse_market_open():
     """
-    DSE ওয়েবসাইট থেকে সরাসরি মার্কেট স্ট্যাটাস চেক করুন
+    DSE ওয়েবসাইট থেকে মার্কেট স্ট্যাটাস চেক - একাধিক মেথড সহ
+    Method 1: DSE হোমপেজ থেকে Market Status টেক্সট স্ক্র্যাপ
+    Method 2: LTP AJAX API-তে ডাটা চেক
+    Method 3: DSE মোবাইল API চেক  
+    Method 4: ট্রেডিং ডাটা আছে কিনা চেক
+    Method 5: টাইম-বেসড ফলব্যাক
     """
+    
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml'
-        }
-        
-        # প্রথমে DSE হোমপেজ চেক করুন
-        response = requests.get('https://www.dsebd.org/', headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Market Status খুঁজুন - সব এলিমেন্ট চেক করুন
-            all_elements = soup.find_all(['span', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'strong', 'b'])
-            
-            for element in all_elements:
-                text = element.get_text().strip().upper()
-                if 'MARKET STATUS' in text:
-                    if 'CLOSED' in text:
-                        return False
-                    elif 'OPEN' in text:
-                        return True
-                # আলাদাভাবে Closed/Open টেক্সট চেক করুন
-                if 'MARKET CLOSED' in text:
-                    return False
-                if 'MARKET OPEN' in text:
-                    return True
-            
-            # body tag এর ভিতরে সব টেক্সট চেক করুন
-            body = soup.find('body')
-            if body:
-                body_text = body.get_text().upper()
-                if 'MARKET STATUS: CLOSED' in body_text or 'MARKET CLOSED' in body_text:
-                    return False
-                if 'MARKET STATUS: OPEN' in body_text or 'MARKET OPEN' in body_text:
-                    return True
-        
-        # দ্বিতীয় চেষ্টা: DSE AJAX API চেক করুন - ট্রেডিং ডাটা আছে কিনা
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+        })
+
+        # Method 1: DSE হোমপেজ স্ক্র্যাপিং
         try:
-            ajax_response = requests.get(
+            response = session.get('https://www.dsebd.org/', timeout=10)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # সমস্ত টেক্সট এলিমেন্ট চেক করুন
+                all_text_elements = soup.find_all(string=True)
+                full_page_text = ' '.join([text.strip() for text in all_text_elements if text.strip()])
+                
+                # Market Status খুঁজুন - বিভিন্ন ফরম্যাটে
+                if re.search(r'Market\s+Status\s*:\s*Open', full_page_text, re.IGNORECASE):
+                    print("[DSE] ✅ MARKET OPEN (Homepage Status)")
+                    return True
+                if re.search(r'Market\s+Status\s*:\s*Closed', full_page_text, re.IGNORECASE):
+                    print("[DSE] ❌ MARKET CLOSED (Homepage Status)")
+                    return False
+                if re.search(r'Market\s+is\s+Open', full_page_text, re.IGNORECASE):
+                    print("[DSE] ✅ MARKET OPEN (Homepage)")
+                    return True
+                if re.search(r'Market\s+is\s+Closed', full_page_text, re.IGNORECASE):
+                    print("[DSE] ❌ MARKET CLOSED (Homepage)")
+                    return False
+                    
+                # নির্দিষ্ট এলিমেন্টে খুঁজুন
+                for tag in ['div', 'span', 'strong', 'b', 'h1', 'h2', 'h3', 'h4', 'p']:
+                    elements = soup.find_all(tag)
+                    for element in elements:
+                        text = element.get_text().strip()
+                        if re.search(r'Market\s+Status\s*:\s*Open', text, re.IGNORECASE):
+                            print(f"[DSE] ✅ MARKET OPEN (Tag: {tag})")
+                            return True
+                        if re.search(r'Market\s+Status\s*:\s*Closed', text, re.IGNORECASE):
+                            print(f"[DSE] ❌ MARKET CLOSED (Tag: {tag})")
+                            return False
+                
+                # CSS ক্লাস দিয়ে খুঁজুন
+                status_elements = soup.find_all(class_=re.compile(r'market|status|trading', re.IGNORECASE))
+                for element in status_elements:
+                    text = element.get_text().strip().upper()
+                    if 'OPEN' in text and ('MARKET' in text or 'TRADING' in text):
+                        print(f"[DSE] ✅ MARKET OPEN (CSS Class)")
+                        return True
+                    if 'CLOSED' in text and ('MARKET' in text or 'TRADING' in text):
+                        print(f"[DSE] ❌ MARKET CLOSED (CSS Class)")
+                        return False
+                        
+        except Exception as e:
+            print(f"[DSE] Method 1 failed: {e}")
+
+        # Method 2: LTP AJAX API চেক - সবচেয়ে নির্ভরযোগ্য
+        try:
+            ajax_response = session.get(
                 'https://www.dsebd.org/latest_share_price_scroll_l.php',
-                headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
-                timeout=10
+                headers={
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Referer': 'https://www.dsebd.org/'
+                },
+                timeout=15
             )
             
             if ajax_response.status_code == 200:
                 soup = BeautifulSoup(ajax_response.text, 'html.parser')
-                tables = soup.find_all('table')
-                if tables:
-                    first_table = tables[0]
-                    rows = first_table.find_all('tr')
-                    # হেডার + ডাটা row থাকলে মার্কেট খোলা
-                    data_rows = [row for row in rows if row.find_all('td')]
-                    if len(data_rows) > 0:
-                        return True
-                    else:
-                        return False
-        except:
-            pass
-        
-        # ফলব্যাক: সময় চেক
-        return is_dse_market_open_by_time()
                 
-    except Exception as e:
-        print(f"DSE website check failed: {e}")
-        return is_dse_market_open_by_time()
+                # টেবিল খুঁজুন
+                tables = soup.find_all('table')
+                
+                for table in tables:
+                    rows = table.find_all('tr')
+                    
+                    # ডাটা row গুনুন (যে row-এ td আছে)
+                    data_rows = []
+                    for row in rows:
+                        tds = row.find_all('td')
+                        if tds and len(tds) >= 3:  # অন্তত ৩টি কলাম থাকতে হবে
+                            # LTP ডাটা ভ্যালিডেশন
+                            try:
+                                # দ্বিতীয় কলামে সাধারণত সিম্বল থাকে
+                                symbol_text = tds[1].get_text(strip=True) if len(tds) > 1 else ''
+                                # তৃতীয় কলামে LTP থাকে
+                                ltp_text = tds[2].get_text(strip=True).replace(',', '') if len(tds) > 2 else ''
+                                
+                                if symbol_text and ltp_text:
+                                    ltp_value = float(ltp_text)
+                                    if ltp_value > 0:  # ভ্যালিড LTP
+                                        data_rows.append(row)
+                            except:
+                                continue
+                    
+                    if len(data_rows) > 10:  # অন্তত ১০টি স্টকের ডাটা থাকলে মার্কেট ওপেন
+                        print(f"[DSE] ✅ MARKET OPEN (LTP Data: {len(data_rows)} stocks)")
+                        return True
+                    elif len(data_rows) > 0:
+                        print(f"[DSE] ⚠️ Limited LTP Data: {len(data_rows)} stocks")
+                        # অল্প ডাটা থাকলেও মার্কেট ওপেন ধরা হবে
+                        return True
+                
+                # টেবিলে ডাটা নেই
+                print(f"[DSE] ❌ MARKET CLOSED (No LTP Data)")
+                return False
+                
+        except Exception as e:
+            print(f"[DSE] Method 2 failed: {e}")
 
-def is_dse_market_open_by_time():
-    """ফলব্যাক: সময় এবং দিন অনুযায়ী চেক"""
+        # Method 3: DSE মোবাইল API চেক
+        try:
+            mobile_response = session.get(
+                'https://www.dsebd.org/mobile.php',
+                timeout=10
+            )
+            
+            if mobile_response.status_code == 200:
+                # মোবাইল ভার্সনে ট্রেডিং ডাটা চেক
+                if '<table' in mobile_response.text and '<td' in mobile_response.text:
+                    soup = BeautifulSoup(mobile_response.text, 'html.parser')
+                    tables = soup.find_all('table')
+                    for table in tables:
+                        rows = table.find_all('tr')
+                        if len(rows) > 5:  # হেডার + কিছু ডাটা
+                            print(f"[DSE] ✅ MARKET OPEN (Mobile API: {len(rows)} rows)")
+                            return True
+        except Exception as e:
+            print(f"[DSE] Method 3 failed: {e}")
+
+        # Method 4: DSE-এর অন্য পেজ চেক
+        try:
+            market_summary = session.get(
+                'https://www.dsebd.org/market_summary.php',
+                timeout=10
+            )
+            
+            if market_summary.status_code == 200:
+                soup = BeautifulSoup(market_summary.text, 'html.parser')
+                
+                # ট্রেড ভলিউম বা টার্নওভার চেক
+                all_text = soup.get_text()
+                
+                # আজকের ডেট চেক
+                today = get_bd_time().strftime('%Y-%m-%d')
+                
+                if 'Turnover' in all_text or 'Volume' in all_text:
+                    # ট্রেডিং এক্টিভিটি আছে
+                    numbers = re.findall(r'[\d,]+\.?\d*', all_text)
+                    for num in numbers:
+                        try:
+                            value = float(num.replace(',', ''))
+                            if value > 0:  # পজিটিভ টার্নওভার
+                                print(f"[DSE] ✅ MARKET OPEN (Market Summary: Turnover found)")
+                                return True
+                        except:
+                            continue
+        except Exception as e:
+            print(f"[DSE] Method 4 failed: {e}")
+
+        # Method 5: টাইম-বেসড ফলব্যাক
+        print("[DSE] ⚠️ All scraping methods failed, using time-based fallback")
+        return _is_dse_market_open_by_time()
+
+    except Exception as e:
+        print(f"[DSE] ❌ All market check methods failed: {e}")
+        return _is_dse_market_open_by_time()
+
+def _is_dse_market_open_by_time():
+    """ফলব্যাক: সময় এবং দিন অনুযায়ী মার্কেট স্ট্যাটাস"""
     now = get_bd_time()
     hour, minute, weekday = now.hour, now.minute, now.weekday()
     
-    # সাপ্তাহিক ছুটি (শুক্রবার = 4)
-    if weekday == 4:
+    # সাপ্তাহিক ছুটি (শুক্রবার = 4, শনিবার = 5)
+    if weekday in [4, 5]:
+        print(f"[DSE] ❌ MARKET CLOSED (Weekend: day {weekday})")
         return False
     
-    # ট্রেডিং সময় (রবি-বৃহস্পতি, 10:00-14:20)
+    # ট্রেডিং আওয়ার (রবি-বৃহস্পতি, সকাল ১০:০০ - দুপুর ২:২০)
     if weekday in [6, 0, 1, 2, 3]:
-        if ((hour == 10 and minute >= 0) or 
-            (10 < hour < 14) or 
-            (hour == 14 and minute <= 20)):
+        current_time = hour * 60 + minute
+        market_open_time = 10 * 60  # 10:00 AM
+        market_close_time = 14 * 60 + 20  # 2:20 PM
+        
+        if market_open_time <= current_time <= market_close_time:
+            print(f"[DSE] ✅ MARKET OPEN (Time: {hour:02d}:{minute:02d})")
             return True
+        else:
+            print(f"[DSE] ❌ MARKET CLOSED (Time: {hour:02d}:{minute:02d}, outside trading hours)")
+            return False
     
+    print(f"[DSE] ❌ MARKET CLOSED (Unknown day: {weekday})")
     return False
-
-# Backward compatibility
-def is_dse_market_open():
-    return is_dse_market_open_from_website()
 
 # ================================
 # API Routes
@@ -163,22 +284,28 @@ async def health():
         "status": "ok", 
         "mongodb": "connected" if col else "not configured",
         "swrsi_signals": swrsi_count,
-        "dse_market": "OPEN" if is_dse_market_open_from_website() else "CLOSED",
+        "dse_market": "OPEN" if is_dse_market_open() else "CLOSED",
         "bangladesh_time": get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
     }
 
 @app.get("/api/market-status")
 async def market_status():
     now = get_bd_time()
-    is_open = is_dse_market_open_from_website()
+    is_open = is_dse_market_open()
     close_time = now.replace(hour=14, minute=20, second=0, microsecond=0)
     time_to_close = (close_time - now).total_seconds()
     alert_10min = is_open and (0 < time_to_close <= 600)
 
     if not is_open:
         weekday = now.weekday()
-        if weekday in [3, 4, 5]: next_open = "Sunday 10:00 AM"
-        else: next_open = "Tomorrow 10:00 AM"
+        if weekday == 4:  # Friday
+            next_open = "Sunday 10:00 AM"
+        elif weekday == 5:  # Saturday
+            next_open = "Sunday 10:00 AM"
+        elif weekday in [0, 1, 2, 3]:  # Mon-Thu
+            next_open = "Tomorrow 10:00 AM"
+        else:  # Sunday
+            next_open = "Tomorrow 10:00 AM"
     else:
         next_open = None
 
@@ -190,7 +317,7 @@ async def market_status():
         "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S'),
         "source": "dse_website"
     }
-    
+
 
 # LTP Cache
 ltp_cache = {"data": {}, "timestamp": None}
@@ -198,12 +325,12 @@ ltp_cache = {"data": {}, "timestamp": None}
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
     """DSE থেকে LTP ডাটা ফেচ করুন - একাধিক ফলব্যাক সহ"""
-    
+
     # ক্যাশ চেক (2 মিনিট) - শুধুমাত্র মার্কেট ওপেন থাকলে
     if ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
         # মার্কেট খোলা থাকলে ২ মিনিটের ক্যাশ ব্যবহার করবে
-        if is_dse_market_open_from_website():
+        if is_dse_market_open():
             if age < 120 and ltp_cache["data"]:
                 return ltp_cache["data"]
         # মার্কেট বন্ধ থাকলে ক্যাশ থেকেই ডাটা দিবে, বার বার ফেচ করবে না
@@ -212,18 +339,12 @@ async def get_dse_ltp():
                 return ltp_cache["data"]
 
     # মার্কেট বন্ধ থাকলে এবং ক্যাশে ডাটা না থাকলে শুধুমাত্র একবার ফেচ করবে
-    if not is_dse_market_open_from_website():
-        # ক্যাশে ডাটা থাকলে সেটাই রিটার্ন করবে (উপরে চেক করা হয়েছে)
-        # ক্যাশে ডাটা না থাকলে একবার ফেচ করার চেষ্টা করবে
+    if not is_dse_market_open():
         if ltp_cache["data"]:
             result = ltp_cache["data"]
-            # মার্কেট বন্ধ স্ট্যাটাস আপডেট
             if isinstance(result, dict):
                 result["status"] = "closed"
             return result
-        else:
-            # ক্যাশে কিছুই নেই, একবার ফেচ করে নিবে
-            pass
 
     ltp_data = {}
     session = requests.Session()
@@ -236,55 +357,78 @@ async def get_dse_ltp():
         'Upgrade-Insecure-Requests': '1',
     })
 
-    # পদ্ধতি ১: DSE AJAX API
+    # পদ্ধতি ১: DSE AJAX API - একাধিক পেজ থেকে ডাটা
     try:
-        response = session.get(
-            'https://www.dsebd.org/latest_share_price_scroll_l.php',
-            headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
-            timeout=15
-        )
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            tables = soup.find_all('table', {'class': 'table'})
-            if not tables:
-                tables = soup.find_all('table')
-            
-            for table in tables:
-                rows = table.find_all('tr')
-                for row in rows:
-                    cols = row.find_all('td')
-                    if len(cols) >= 8:
-                        try:
-                            symbol_link = cols[1].find('a') if len(cols) > 1 else None
-                            symbol = symbol_link.text.strip() if symbol_link else cols[1].get_text(strip=True) if len(cols) > 1 else None
-                            
-                            ltp_text = cols[2].get_text(strip=True).replace(',', '') if len(cols) > 3 else None
-                            
-                            if symbol and ltp_text and len(symbol) >= 2 and symbol[0].isalpha():
+        for page in range(1, 6):  # 5 পেজ পর্যন্ত চেষ্টা
+            try:
+                response = session.get(
+                    f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}',
+                    headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
+                    timeout=10
+                )
+
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+
+                    tables = soup.find_all('table', {'class': 'table'})
+                    if not tables:
+                        tables = soup.find_all('table')
+
+                    page_has_data = False
+                    for table in tables:
+                        rows = table.find_all('tr')
+                        for row in rows:
+                            cols = row.find_all('td')
+                            if len(cols) >= 3:
                                 try:
-                                    ltp = float(ltp_text)
-                                    if 0.1 < ltp < 50000:
-                                        ltp_data[symbol.upper()] = ltp
-                                except ValueError:
+                                    # সিম্বল - বিভিন্ন লোকেশন থেকে ট্রাই
+                                    symbol = None
+                                    for col_idx in [1, 0, 2]:
+                                        if len(cols) > col_idx:
+                                            link = cols[col_idx].find('a')
+                                            if link:
+                                                symbol = link.text.strip()
+                                                break
+                                            else:
+                                                text = cols[col_idx].get_text(strip=True)
+                                                if text and len(text) >= 2 and text[0].isalpha():
+                                                    symbol = text
+                                                    break
+
+                                    # LTP - বিভিন্ন লোকেশন থেকে ট্রাই
+                                    ltp = None
+                                    for col_idx in [2, 3, 4, 5]:
+                                        if len(cols) > col_idx:
+                                            ltp_text = cols[col_idx].get_text(strip=True).replace(',', '')
+                                            try:
+                                                ltp = float(ltp_text)
+                                                if 0.1 < ltp < 50000:
+                                                    break
+                                            except:
+                                                continue
+
+                                    if symbol and ltp:
+                                        symbol = symbol.upper().strip()
+                                        ltp_data[symbol] = ltp
+                                        page_has_data = True
+                                except:
                                     continue
-                        except:
-                            continue
                     
-                    if len(ltp_data) > 400:
-                        break
-                
-                if len(ltp_data) > 400:
-                    break
-        
+                    if not page_has_data:
+                        break  # এই পেজে ডাটা নেই, আর পেজ চেক করার দরকার নেই
+                        
+            except Exception as e:
+                print(f"[LTP] Page {page} failed: {e}")
+                break
+
         if ltp_data:
-            status = "live" if is_dse_market_open_from_website() else "closed"
-            result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api"}
+            status = "live" if is_dse_market_open() else "closed"
+            print(f"[LTP] ✅ Successfully fetched {len(ltp_data)} symbols")
+            result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api_multipage"}
             ltp_cache["data"] = result
             ltp_cache["timestamp"] = get_bd_time()
             return result
-            
+
     except Exception as e:
         print(f"[LTP] Method 1 failed: {e}")
 
@@ -295,56 +439,71 @@ async def get_dse_ltp():
             time.sleep(1.5)
         except:
             pass
-        
+
         response = session.get(
             'https://www.dsebd.org/latest_share_price_scroll_by_ltp.php',
             timeout=15
         )
-        
+
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
             for table in soup.find_all('table'):
                 rows = table.find_all('tr')
                 for row in rows:
                     cols = row.find_all('td')
-                    if len(cols) >= 11:
+                    if len(cols) >= 3:
                         try:
-                            symbol_elem = cols[1].find('a') if len(cols) > 1 else None
-                            symbol = symbol_elem.text.strip() if symbol_elem else cols[1].get_text(strip=True) if len(cols) > 1 else None
-                            
-                            ltp_text = cols[5].get_text(strip=True).replace(',', '') if len(cols) > 5 else None
-                            
-                            if symbol and ltp_text and len(symbol) >= 2:
-                                try:
-                                    ltp = float(ltp_text)
-                                    if 0.1 < ltp < 50000:
-                                        ltp_data[symbol.upper()] = ltp
-                                except ValueError:
-                                    continue
+                            symbol = None
+                            # বিভিন্ন কলাম থেকে সিম্বল খুঁজুন
+                            for col_idx in [1, 0]:
+                                if len(cols) > col_idx:
+                                    link = cols[col_idx].find('a')
+                                    if link:
+                                        symbol = link.text.strip()
+                                        break
+                                    else:
+                                        text = cols[col_idx].get_text(strip=True)
+                                        if text and len(text) >= 2 and text[0].isalpha():
+                                            symbol = text
+                                            break
+
+                            # বিভিন্ন কলাম থেকে LTP খুঁজুন
+                            ltp = None
+                            for col_idx in [5, 4, 3, 2]:
+                                if len(cols) > col_idx:
+                                    ltp_text = cols[col_idx].get_text(strip=True).replace(',', '')
+                                    try:
+                                        ltp = float(ltp_text)
+                                        if 0.1 < ltp < 50000:
+                                            break
+                                    except:
+                                        continue
+
+                            if symbol and ltp:
+                                ltp_data[symbol.upper()] = ltp
                         except:
                             continue
-                
-                if len(ltp_data) > 100:
-                    break
-        
+
         if ltp_data:
-            status = "live" if is_dse_market_open_from_website() else "closed"
+            status = "live" if is_dse_market_open() else "closed"
+            print(f"[LTP] ✅ Method 2: Fetched {len(ltp_data)} symbols")
             result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "html_table"}
             ltp_cache["data"] = result
             ltp_cache["timestamp"] = get_bd_time()
             return result
-            
+
     except Exception as e:
         print(f"[LTP] Method 2 failed: {e}")
 
     # কোনো ডাটা পাওয়া যায়নি
-    status = "live" if is_dse_market_open_from_website() else "closed"
+    status = "live" if is_dse_market_open() else "closed"
+    print(f"[LTP] ❌ Failed to fetch any data. Market status: {status}")
     return {
-        "status": "error",
-        "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি",
-        "ltp_data": {},
-        "source": "none"
+        "status": status if ltp_cache["data"] else "error",
+        "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি" if not ltp_cache["data"] else "Using cached data",
+        "ltp_data": ltp_cache["data"].get("ltp_data", {}) if ltp_cache["data"] else {},
+        "source": "cache" if ltp_cache["data"] else "none"
     }
 
 # ================================
@@ -445,12 +604,12 @@ async def get_signals(
     else:
         # Default: diff ASC (low to high), gape DESC (high to low)
         sort_criteria = [('diff', 1), ('gape', -1)]
-    
+
     cursor = collection.find(query, {'_id': 0})
     if sort_criteria:
         cursor = cursor.sort(sort_criteria)
     cursor = cursor.limit(limit)
-    
+
     return {"data": list(cursor)}
 
 @app.get("/api/swrsi")
@@ -472,7 +631,7 @@ async def get_swrsi(
             query = build_date_query(latest_date)
 
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    
+
     # Default sorting
     sort_criteria = []
     if sort_by:
@@ -481,11 +640,11 @@ async def get_swrsi(
     else:
         # Default: diff ASC, gape DESC
         sort_criteria = [('diff', 1), ('gape', -1)]
-    
+
     cursor = col.find(query, {'_id': 0})
     if sort_criteria:
         cursor = cursor.sort(sort_criteria)
-    
+
     data = list(cursor)
     all_dates = sorted(col.distinct('analysis_date'), reverse=True)
     return {"signals": data, "total_signals": len(data), "available_dates": all_dates}
@@ -529,7 +688,7 @@ async def get_generic_data(
             query = build_date_query(latest_date)
 
     if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    
+
     # Default sorting
     sort_criteria = []
     if sort_by:
@@ -538,12 +697,12 @@ async def get_generic_data(
     else:
         # Default: diff ASC, gape DESC
         sort_criteria = [('diff', 1), ('gape', -1)]
-    
+
     cursor = col.find(query, {'_id': 0})
     if sort_criteria:
         cursor = cursor.sort(sort_criteria)
     data = list(cursor.limit(limit))
-    
+
     return {"data": data}
 
 @app.delete("/api/delete-signal")
@@ -577,35 +736,35 @@ async def update_trade(
 ):
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-    
+
     update_fields = {
         'edited': True, 
         'edited_at': datetime.now().isoformat()
     }
-    
+
     if entry_price is not None: update_fields['entry_price'] = entry_price
     if stop_loss is not None: update_fields['stop_loss'] = stop_loss
     if target_price is not None: update_fields['target_price'] = target_price
     if total_exposure is not None: update_fields['total_exposure'] = total_exposure
     if risk_percent is not None: update_fields['risk_percent'] = risk_percent
-    
+
     if entry_price and stop_loss and target_price:
         risk = abs(entry_price - stop_loss)
         reward = abs(target_price - entry_price)
         if risk > 0:
             update_fields['risk_reward_ratio'] = round(reward / risk, 2)
-    
+
     result = col.update_one(
         {'symbol': symbol, 'analysis_date': date}, 
         {'$set': update_fields}
     )
-    
+
     if result.matched_count == 0:
         result = col.update_one(
             {'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}}, 
             {'$set': update_fields}
         )
-    
+
     return {"updated": result.modified_count, "matched": result.matched_count}
 
 @app.get("/api/collection-symbols")
