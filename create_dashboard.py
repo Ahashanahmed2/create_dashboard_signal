@@ -11,6 +11,7 @@ create_dashboard.py
 ✅ UptimeRobot HEAD endpoint
 ✅ LTP > High Breakout Row Highlight (GREEN)
 ✅ Default Sort: diff ASC, gape DESC
+✅ LTP Fetch: Only when market open (every 2 min), if closed fetch once only
 """
 
 import os
@@ -29,7 +30,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="18.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="18.0.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -320,32 +321,44 @@ async def market_status():
 
 
 # LTP Cache
-ltp_cache = {"data": {}, "timestamp": None}
+ltp_cache = {"data": {}, "timestamp": None, "fetched_once_when_closed": False}
 
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
-    """DSE থেকে LTP ডাটা ফেচ করুন - একাধিক ফলব্যাক সহ"""
-
-    # ক্যাশ চেক (2 মিনিট) - শুধুমাত্র মার্কেট ওপেন থাকলে
+    """DSE থেকে LTP ডাটা ফেচ করুন - মার্কেট ওপেন থাকলে ২ মিনিট পর পর, ক্লোজ থাকলে একবার"""
+    
+    market_open = is_dse_market_open()
+    
+    # ক্যাশ চেক
     if ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
-        # মার্কেট খোলা থাকলে ২ মিনিটের ক্যাশ ব্যবহার করবে
-        if is_dse_market_open():
+        
+        # মার্কেট ওপেন থাকলে ২ মিনিটের ক্যাশ ব্যবহার করবে
+        if market_open:
             if age < 120 and ltp_cache["data"]:
+                print(f"[LTP] Cache hit, age: {age:.0f}s (market open)")
                 return ltp_cache["data"]
-        # মার্কেট বন্ধ থাকলে ক্যাশ থেকেই ডাটা দিবে, বার বার ফেচ করবে না
         else:
-            if ltp_cache["data"]:
-                return ltp_cache["data"]
-
-    # মার্কেট বন্ধ থাকলে এবং ক্যাশে ডাটা না থাকলে শুধুমাত্র একবার ফেচ করবে
-    if not is_dse_market_open():
+            # মার্কেট ক্লোজ থাকলে ক্যাশে ডাটা থাকলে সেটাই রিটার্ন করবে (একবার ফেচ করার পর আর ফেচ করবে না)
+            if ltp_cache["data"] and ltp_cache.get("fetched_once_when_closed", False):
+                print(f"[LTP] Using cached data (market closed, fetched once)")
+                result = ltp_cache["data"]
+                if isinstance(result, dict):
+                    result["status"] = "closed"
+                return result
+    
+    # মার্কেট ক্লোজ থাকলে এবং আগে কখনো ফেচ করেনি (fetched_once_when_closed = False) তাহলে একবার ফেচ করবে
+    if not market_open and ltp_cache.get("fetched_once_when_closed", False):
+        # ইতিমধ্যে ফেচ করেছে, আর ফেচ করবে না
         if ltp_cache["data"]:
+            print("[LTP] Market closed, already fetched once. Returning cached data.")
             result = ltp_cache["data"]
             if isinstance(result, dict):
                 result["status"] = "closed"
             return result
-
+    
+    # LTP ডাটা ফেচ করুন
+    print(f"[LTP] Fetching LTP data (market open: {market_open})")
     ltp_data = {}
     session = requests.Session()
     session.headers.update({
@@ -422,11 +435,12 @@ async def get_dse_ltp():
                 break
 
         if ltp_data:
-            status = "live" if is_dse_market_open() else "closed"
+            status = "live" if market_open else "closed"
             print(f"[LTP] ✅ Successfully fetched {len(ltp_data)} symbols")
             result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api_multipage"}
             ltp_cache["data"] = result
             ltp_cache["timestamp"] = get_bd_time()
+            ltp_cache["fetched_once_when_closed"] = not market_open  # ক্লোজ থাকলে true সেট করবে
             return result
 
     except Exception as e:
@@ -486,24 +500,33 @@ async def get_dse_ltp():
                             continue
 
         if ltp_data:
-            status = "live" if is_dse_market_open() else "closed"
+            status = "live" if market_open else "closed"
             print(f"[LTP] ✅ Method 2: Fetched {len(ltp_data)} symbols")
             result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "html_table"}
             ltp_cache["data"] = result
             ltp_cache["timestamp"] = get_bd_time()
+            ltp_cache["fetched_once_when_closed"] = not market_open
             return result
 
     except Exception as e:
         print(f"[LTP] Method 2 failed: {e}")
 
     # কোনো ডাটা পাওয়া যায়নি
-    status = "live" if is_dse_market_open() else "closed"
+    status = "live" if market_open else "closed"
     print(f"[LTP] ❌ Failed to fetch any data. Market status: {status}")
+    
+    # যদি ক্যাশে ডাটা থাকে সেটা রিটার্ন করবে
+    if ltp_cache["data"]:
+        result = ltp_cache["data"]
+        if isinstance(result, dict):
+            result["status"] = status
+        return result
+    
     return {
-        "status": status if ltp_cache["data"] else "error",
-        "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি" if not ltp_cache["data"] else "Using cached data",
-        "ltp_data": ltp_cache["data"].get("ltp_data", {}) if ltp_cache["data"] else {},
-        "source": "cache" if ltp_cache["data"] else "none"
+        "status": "error",
+        "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি",
+        "ltp_data": {},
+        "source": "none"
     }
 
 # ================================
@@ -539,249 +562,6 @@ def get_latest_date_from_collection(collection_name):
         if isinstance(val, str) and len(val) >= 10:
             return val[:10]
     return None
-
-@app.get("/api/dates")
-async def get_dates(collection: str = Query("daily_ai_signals")):
-    col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-
-    dates_set = set()
-
-    try:
-        for d in col.distinct('analysis_date'):
-            if d:
-                if isinstance(d, datetime): dates_set.add(d.strftime('%Y-%m-%d'))
-                elif isinstance(d, str) and re.match(r'\d{4}-\d{2}-\d{2}', d.strip()): dates_set.add(d.strip())
-    except: pass
-
-    try:
-        for doc in col.find({'saved_at': {'$exists': True}}, {'saved_at': 1}).limit(2000):
-            val = doc.get('saved_at', '')
-            if isinstance(val, str) and len(val) >= 10:
-                d = val[:10]
-                if re.match(r'\d{4}-\d{2}-\d{2}', d): dates_set.add(d)
-    except: pass
-
-    return sorted(list(dates_set), reverse=True)
-
-@app.get("/api/swrsi/dates")
-async def get_swrsi_dates():
-    col = get_mongo_collection("swrsi_signals")
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-    dates = col.distinct('analysis_date')
-    return sorted(dates, reverse=True)
-
-@app.get("/api/signals")
-async def get_signals(
-    date: str = Query(None), 
-    signal: str = Query(None), 
-    symbol: str = Query(None), 
-    min_score: float = Query(0), 
-    limit: int = Query(1000),
-    sort_by: str = Query(None),
-    sort_order: str = Query("asc")
-):
-    collection = get_mongo_collection()
-    if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-
-    query = {}
-    if date: 
-        query = build_date_query(date)
-    else:
-        latest_date = get_latest_date_from_collection("daily_ai_signals")
-        if latest_date:
-            query = build_date_query(latest_date)
-
-    if signal: query['final_signal'] = {'$regex': signal, '$options': 'i'}
-    if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-    if min_score > 0: query['final_combined_score'] = {'$gte': min_score}
-
-    # Default sorting
-    sort_criteria = []
-    if sort_by:
-        sort_dir = -1 if sort_order == "desc" else 1
-        sort_criteria.append((sort_by, sort_dir))
-    else:
-        # Default: diff ASC (low to high), gape DESC (high to low)
-        sort_criteria = [('diff', 1), ('gape', -1)]
-
-    cursor = collection.find(query, {'_id': 0})
-    if sort_criteria:
-        cursor = cursor.sort(sort_criteria)
-    cursor = cursor.limit(limit)
-
-    return {"data": list(cursor)}
-
-@app.get("/api/swrsi")
-async def get_swrsi(
-    date: str = Query(None), 
-    symbol: str = Query(None),
-    sort_by: str = Query(None),
-    sort_order: str = Query("asc")
-):
-    col = get_mongo_collection("swrsi_signals")
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-
-    query = {}
-    if date:
-        query = build_date_query(date)
-    else:
-        latest_date = get_latest_date_from_collection("swrsi_signals")
-        if latest_date:
-            query = build_date_query(latest_date)
-
-    if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-
-    # Default sorting
-    sort_criteria = []
-    if sort_by:
-        sort_dir = -1 if sort_order == "desc" else 1
-        sort_criteria.append((sort_by, sort_dir))
-    else:
-        # Default: diff ASC, gape DESC
-        sort_criteria = [('diff', 1), ('gape', -1)]
-
-    cursor = col.find(query, {'_id': 0})
-    if sort_criteria:
-        cursor = cursor.sort(sort_criteria)
-
-    data = list(cursor)
-    all_dates = sorted(col.distinct('analysis_date'), reverse=True)
-    return {"signals": data, "total_signals": len(data), "available_dates": all_dates}
-
-@app.get("/api/stats")
-async def get_stats(date: str = Query(None)):
-    collection = get_mongo_collection()
-    if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-
-    query = {}
-    if date: 
-        query = build_date_query(date)
-    else:
-        latest_date = get_latest_date_from_collection("daily_ai_signals")
-        if latest_date:
-            query = build_date_query(latest_date)
-
-    pipeline = [{'$match': query}, {'$group': {'_id': None, 'total': {'$sum': 1}, 'avg_score': {'$avg': '$final_combined_score'}}}]
-    result = list(collection.aggregate(pipeline))
-    if result: return {k: v for k, v in result[0].items() if k != '_id'}
-    return {"total": 0, "avg_score": 0}
-
-@app.get("/api/generic-data")
-async def get_generic_data(
-    collection: str = Query(...), 
-    date: str = Query(None), 
-    symbol: str = Query(None), 
-    limit: int = Query(500),
-    sort_by: str = Query(None),
-    sort_order: str = Query("asc")
-):
-    col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-
-    query = {}
-    if date:
-        query = build_date_query(date)
-    else:
-        latest_date = get_latest_date_from_collection(collection)
-        if latest_date:
-            query = build_date_query(latest_date)
-
-    if symbol: query['symbol'] = {'$regex': f'^{symbol}', '$options': 'i'}
-
-    # Default sorting
-    sort_criteria = []
-    if sort_by:
-        sort_dir = -1 if sort_order == "desc" else 1
-        sort_criteria.append((sort_by, sort_dir))
-    else:
-        # Default: diff ASC, gape DESC
-        sort_criteria = [('diff', 1), ('gape', -1)]
-
-    cursor = col.find(query, {'_id': 0})
-    if sort_criteria:
-        cursor = cursor.sort(sort_criteria)
-    data = list(cursor.limit(limit))
-
-    return {"data": data}
-
-@app.delete("/api/delete-signal")
-async def delete_signal(collection: str = Query("daily_ai_signals"), symbol: str = Query(...), date: str = Query(...)):
-    col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-    result = col.delete_one({'symbol': symbol, 'analysis_date': date})
-    if result.deleted_count == 0:
-        result = col.delete_one({'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}})
-    return {"deleted": result.deleted_count}
-
-@app.delete("/api/delete-all-by-date")
-async def delete_all_by_date(collection: str = Query(...), date: str = Query(...)):
-    col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-    result1 = col.delete_many({'analysis_date': date})
-    result2 = col.delete_many({'saved_at': {'$regex': f'^{date}'}})
-    total = result1.deleted_count + result2.deleted_count
-    return {"deleted": total, "collection": collection, "date": date}
-
-@app.put("/api/update-trade")
-async def update_trade(
-    collection: str = Query("daily_ai_signals"),
-    symbol: str = Query(...), 
-    date: str = Query(...), 
-    entry_price: float = Query(None), 
-    stop_loss: float = Query(None), 
-    target_price: float = Query(None),
-    total_exposure: float = Query(None),
-    risk_percent: float = Query(None)
-):
-    col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-
-    update_fields = {
-        'edited': True, 
-        'edited_at': datetime.now().isoformat()
-    }
-
-    if entry_price is not None: update_fields['entry_price'] = entry_price
-    if stop_loss is not None: update_fields['stop_loss'] = stop_loss
-    if target_price is not None: update_fields['target_price'] = target_price
-    if total_exposure is not None: update_fields['total_exposure'] = total_exposure
-    if risk_percent is not None: update_fields['risk_percent'] = risk_percent
-
-    if entry_price and stop_loss and target_price:
-        risk = abs(entry_price - stop_loss)
-        reward = abs(target_price - entry_price)
-        if risk > 0:
-            update_fields['risk_reward_ratio'] = round(reward / risk, 2)
-
-    result = col.update_one(
-        {'symbol': symbol, 'analysis_date': date}, 
-        {'$set': update_fields}
-    )
-
-    if result.matched_count == 0:
-        result = col.update_one(
-            {'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}}, 
-            {'$set': update_fields}
-        )
-
-    return {"updated": result.modified_count, "matched": result.matched_count}
-
-@app.get("/api/collection-symbols")
-async def get_collection_symbols(collection: str = Query(...), date: str = Query(None)):
-    col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-
-    query = {}
-    if date:
-        query = build_date_query(date)
-    else:
-        latest_date = get_latest_date_from_collection(collection)
-        if latest_date:
-            query = build_date_query(latest_date)
-
-    symbols = col.distinct('symbol', query)
-    return sorted([s for s in symbols if s])
 
 # ================================
 # HTML Dashboard
@@ -959,6 +739,7 @@ async def dashboard():
         let editingRow = null;
         let alertRules = [];
         let currentTradeSymbol = null;
+        let lastMarketStatus = null;
         
         // Sorting state
         let currentSort = { field: null, order: null };
@@ -975,90 +756,28 @@ async def dashboard():
 
         loadDates(COLLECTION_MAP[currentTab]);
         loadCurrentTab();
-        checkMarketStatus();
-        loadDseLtp();
+        checkMarketStatusAndLtp();
         loadAlertRules();
-        setInterval(checkMarketStatus, 60000);
-        // মার্কেট ওপেন থাকলে ৬০ সেকেন্ডে LTP ফেচ, বন্ধ থাকলে ফেচ করবে না
-        setInterval(() => {
-            fetch('/api/market-status').then(r => r.json()).then(s => {
-                if (s.is_open) loadDseLtp();
-            });
-        }, 60000);
+        setInterval(checkMarketStatusAndLtp, 60000);
+        setInterval(() => refreshLtpBasedOnMarket(), 60000);
         updateSortStatus();
 
-        function loadAlertRules() {
-            const saved = localStorage.getItem('ltpAlertRules_v30');
-            if (saved) { try { alertRules = JSON.parse(saved); } catch(e) { alertRules = []; } }
-            updateAlertUI();
-        }
-        
-        function saveAlertRules() { 
-            localStorage.setItem('ltpAlertRules_v30', JSON.stringify(alertRules)); 
-            updateAlertUI(); 
-            renderCurrentTab(); 
-        }
-        
-        function updateAlertUI() {
-            const bar = document.getElementById('alertStatusBar');
-            if (alertRules.length > 0) {
-                bar.style.display = 'block';
-                bar.innerHTML = '🔔 <strong>' + alertRules.length + ' Alert(s):</strong> ' + 
-                    alertRules.map(r => r.symbol + ' ' + (r.condition === 'above' ? '↑>' : '↓<') + ' ' + r.threshold).join(' | ');
-            } else {
-                bar.style.display = 'none';
-            }
-        }
-
-        function updateSortStatus() {
-            const statusDiv = document.getElementById('sortStatus');
-            if (currentSort.field) {
-                statusDiv.innerHTML = '📊 <strong>Sorted by:</strong> ' + currentSort.field + ' (' + currentSort.order.toUpperCase() + ') | <span style="cursor:pointer;color:#ffa500;" onclick="resetSort()">↺ Reset to Default</span>';
-                statusDiv.style.display = 'block';
-            } else {
-                statusDiv.innerHTML = '📊 <strong>Default Sort:</strong> diff ASC (↓low first), gape DESC (↑high first)';
-                statusDiv.style.display = 'block';
-            }
-        }
-
-        function handleSort(field) {
-            if (currentSort.field === field) {
-                // Toggle order
-                currentSort.order = currentSort.order === 'asc' ? 'desc' : 'asc';
-            } else {
-                // New field - start with asc for diff, desc for gape
-                currentSort.field = field;
-                currentSort.order = (field === 'diff') ? 'asc' : (field === 'gape' ? 'desc' : 'asc');
-            }
-            updateSortStatus();
-            loadCurrentTab();
-        }
-
-        function resetSort() {
-            currentSort = { field: null, order: null };
-            updateSortStatus();
-            loadCurrentTab();
-        }
-
-        function getSortIndicator(field) {
-            if (currentSort.field === field) {
-                return '<span class="sort-indicator">' + (currentSort.order === 'asc' ? '▲' : '▼') + '</span>';
-            }
-            // Show default indicators
-            if (!currentSort.field) {
-                if (field === 'diff') return '<span class="sort-indicator" style="color:#ffa500;">▲</span>';
-                if (field === 'gape') return '<span class="sort-indicator" style="color:#ffa500;">▼</span>';
-            }
-            return '<span class="sort-indicator" style="opacity:0.3;">⇅</span>';
-        }
-
-        async function checkMarketStatus() {
+        async function checkMarketStatusAndLtp() {
             const res = await fetch('/api/market-status');
             const s = await res.json();
             document.getElementById('marketStatus').innerHTML = s.is_open 
                 ? `🟢 DSE MARKET OPEN | ${s.bangladesh_time || ''}`
                 : `🔴 DSE CLOSED | Opens ${s.next_open || 'next session'} | ${s.bangladesh_time || ''}`;
             document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
+            
+            // LTP fetch based on market status
+            await loadDseLtp();
+        }
+
+        async function refreshLtpBasedOnMarket() {
+            // This function will be called every 60 seconds
+            // The API now handles the logic (fetches only when market open, or once when closed)
+            await loadDseLtp();
         }
 
         async function loadDseLtp() {
@@ -1067,6 +786,7 @@ async def dashboard():
                 const j = await r.json();
                 if (j.status === 'live' || j.status === 'closed' || j.status === 'cached') {
                     dseLtpData = j.ltp_data || {};
+                    console.log(`[LTP] Loaded ${Object.keys(dseLtpData).length} symbols, status: ${j.status}`);
                 }
                 renderCurrentTab();
             } catch(e) {
@@ -1091,7 +811,6 @@ async def dashboard():
             if (currentSort.field) {
                 sortParam = `&sort_by=${currentSort.field}&sort_order=${currentSort.order}`;
             }
-            // Default sorting is handled by API (diff ASC, gape DESC)
             
             if (currentTab === 'ai_signals') {
                 let url = `/api/signals?date=${date}&limit=1000${sortParam}`;
@@ -1122,8 +841,9 @@ async def dashboard():
         }
 
         function switchTab(t) {
+            const clickedTab = event.target.closest('.tab');
             document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-            event.target.classList.add('active');
+            clickedTab.classList.add('active');
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
             const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
@@ -1440,7 +1160,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </tr></thead><tbody>`;
+             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const safeId = (r.symbol || '').replace(/[^a-zA-Z0-9]/g, '_');
@@ -1494,7 +1214,7 @@ async def dashboard():
                     <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
                     <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
                     <td>${actionCell}</td>
-                </tr>`;
+                 </tr>`;
             });
             html += '</tbody></table>';
             div.innerHTML = html;
@@ -1520,7 +1240,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </tr></thead><tbody>`;
+             </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const highPrice = r.high || r.daily_last_high || r.weekly_curr_high || 0;
@@ -1581,7 +1301,7 @@ async def dashboard():
                 }).join('')}
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </tr></thead><tbody>`;
+              </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const highPrice = r.high || r.current_high || r.breakout_high || r.last_high || 0;
@@ -1631,38 +1351,99 @@ async def dashboard():
             openTradeModal();
         }
 
-        // ==================== PWA Install ====================
-let deferredPrompt;
-
-window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    deferredPrompt = e;
-    document.getElementById('installBtn').style.display = 'inline-block';
-});
-
-function installApp() {
-    if (deferredPrompt) {
-        deferredPrompt.prompt();
-        deferredPrompt.userChoice.then((choiceResult) => {
-            if (choiceResult.outcome === 'accepted') {
-                console.log('✅ User installed the app');
+        function loadAlertRules() {
+            const saved = localStorage.getItem('ltpAlertRules_v30');
+            if (saved) { try { alertRules = JSON.parse(saved); } catch(e) { alertRules = []; } }
+            updateAlertUI();
+        }
+        
+        function saveAlertRules() { 
+            localStorage.setItem('ltpAlertRules_v30', JSON.stringify(alertRules)); 
+            updateAlertUI(); 
+            renderCurrentTab(); 
+        }
+        
+        function updateAlertUI() {
+            const bar = document.getElementById('alertStatusBar');
+            if (alertRules.length > 0) {
+                bar.style.display = 'block';
+                bar.innerHTML = '🔔 <strong>' + alertRules.length + ' Alert(s):</strong> ' + 
+                    alertRules.map(r => r.symbol + ' ' + (r.condition === 'above' ? '↑>' : '↓<') + ' ' + r.threshold).join(' | ');
+            } else {
+                bar.style.display = 'none';
             }
-            deferredPrompt = null;
+        }
+
+        function updateSortStatus() {
+            const statusDiv = document.getElementById('sortStatus');
+            if (currentSort.field) {
+                statusDiv.innerHTML = '📊 <strong>Sorted by:</strong> ' + currentSort.field + ' (' + currentSort.order.toUpperCase() + ') | <span style="cursor:pointer;color:#ffa500;" onclick="resetSort()">↺ Reset to Default</span>';
+                statusDiv.style.display = 'block';
+            } else {
+                statusDiv.innerHTML = '📊 <strong>Default Sort:</strong> diff ASC (↓low first), gape DESC (↑high first)';
+                statusDiv.style.display = 'block';
+            }
+        }
+
+        function handleSort(field) {
+            if (currentSort.field === field) {
+                currentSort.order = currentSort.order === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSort.field = field;
+                currentSort.order = (field === 'diff') ? 'asc' : (field === 'gape' ? 'desc' : 'asc');
+            }
+            updateSortStatus();
+            loadCurrentTab();
+        }
+
+        function resetSort() {
+            currentSort = { field: null, order: null };
+            updateSortStatus();
+            loadCurrentTab();
+        }
+
+        function getSortIndicator(field) {
+            if (currentSort.field === field) {
+                return '<span class="sort-indicator">' + (currentSort.order === 'asc' ? '▲' : '▼') + '</span>';
+            }
+            if (!currentSort.field) {
+                if (field === 'diff') return '<span class="sort-indicator" style="color:#ffa500;">▲</span>';
+                if (field === 'gape') return '<span class="sort-indicator" style="color:#ffa500;">▼</span>';
+            }
+            return '<span class="sort-indicator" style="opacity:0.3;">⇅</span>';
+        }
+
+        // ==================== PWA Install ====================
+        let deferredPrompt;
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            document.getElementById('installBtn').style.display = 'inline-block';
+        });
+
+        function installApp() {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                deferredPrompt.userChoice.then((choiceResult) => {
+                    if (choiceResult.outcome === 'accepted') {
+                        console.log('✅ User installed the app');
+                    }
+                    deferredPrompt = null;
+                    document.getElementById('installBtn').style.display = 'none';
+                });
+            }
+        }
+
+        if (window.matchMedia('(display-mode: standalone)').matches) {
             document.getElementById('installBtn').style.display = 'none';
-        });
-    }
-}
+        }
 
-// Already installed check
-if (window.matchMedia('(display-mode: standalone)').matches) {
-    document.getElementById('installBtn').style.display = 'none';
-}
-
-       if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-            navigator.serviceWorker.register('/sw.js');
-        });
-    }
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js');
+            });
+        }
     </script>
 </body>
 </html>
