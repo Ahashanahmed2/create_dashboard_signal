@@ -982,7 +982,7 @@ async def dashboard():
         loadDseLtp();
         loadAlertRules();
         setInterval(checkMarketStatus, 60000);
-        // LTP ফেচ - API নিজেই হ্যান্ডেল করবে কখন ফেচ করতে হবে (মার্কেট ওপেন=২মিনিট, ক্লোজ=একবার)
+        // LTP ফেচ - API নিজেই হ্যান্ডেল করবে কখন ফেচ করতে হবে
         setInterval(() => { loadDseLtp(); }, 120000);
         updateSortStatus();
 
@@ -1440,7 +1440,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </table></thead><tbody>`;
+            </td></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const safeId = (r.symbol || '').replace(/[^a-zA-Z0-9]/g, '_');
@@ -1536,17 +1536,25 @@ async def dashboard():
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
                 html += `<tr class="${rowClass}">
-                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td><td>${r.sector || ''}</td>
+                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
+                    <td>${r.sector || ''}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
-                    <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
+                    <td>${r.weekly_divergence || ''}</td>
+                    <td>${r.weekly_strength_label || ''}</td>
                     <td>${r.weekly_strength_score || 0}</td>
-                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td><td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td><td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
-                    <td>${r.weekly_prev_date || ''}</td><td>${r.weekly_curr_date || ''}</td>
-                    <td>${r.daily_divergence_type || ''}</td><td>${r.daily_divergence_strength || ''}</td>
-                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td><td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td>
+                    <td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
+                    <td>${r.weekly_prev_date || ''}</td>
+                    <td>${r.weekly_curr_date || ''}</td>
+                    <td>${r.daily_divergence_type || ''}</td>
+                    <td>${r.daily_divergence_strength || ''}</td>
+                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
                     <td style="color:#ffd700;font-weight:bold;">${r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-'}</td>
                     <td style="color:#00d4ff;font-weight:bold;">${r.gape !== undefined ? r.gape.toFixed(2) : '-'}</td>
                     <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
@@ -1569,7 +1577,7 @@ async def dashboard():
             const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at','p1_date','p2_date','level_date','level_price','type','high_x','high_y','no','prev_high','swing_highs_count','swing_highs_details','uptrand_date','SL','buy','dd','dl','No','low'];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             
-            let html = `<tr><thead></tr>
+            let html = `<tr><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
                 <th>LTP</th>
