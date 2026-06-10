@@ -1166,7 +1166,20 @@ async def dashboard():
         function switchTab(t) {
             const event = window.event;
             document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-            if (event && event.target) event.target.classList.add('active');
+            if (event && event.target) {
+                event.target.classList.add('active');
+            } else {
+                const tabs = document.querySelectorAll('.tab');
+                for (let tab of tabs) {
+                    if (tab.innerText.includes(t === 'ai_signals' ? 'AI Signals' : 
+                        (t === 'swrsi' ? 'SWRSI' :
+                        (t === 'support' ? 'S/R' :
+                        (t === 'ema' ? 'EMA 21' : 'Daily Buy'))))) {
+                        tab.classList.add('active');
+                        break;
+                    }
+                }
+            }
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
             const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
@@ -1483,7 +1496,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </tr></thead><tbody>`;
+            </table></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const safeId = (r.symbol || '').replace(/[^a-zA-Z0-9]/g, '_');
@@ -1552,7 +1565,7 @@ async def dashboard():
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
             
-            let html = `</table><thead><tr>
+            let html = `<table><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
                 <th>Sector</th><th>LTP</th>
@@ -1616,7 +1629,11 @@ async def dashboard():
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
             
             const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at','p1_date','p2_date','level_date','level_price','type','high_x','high_y','no','prev_high','swing_highs_count','swing_highs_details','uptrand_date','SL','buy','dd','dl','No','low'];
-            const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
+            
+            // Define columns in specific order for better display
+            const orderedKeys = ['bbr', 'file', 'gape', 'high', 'rt', 'strong'];
+            const otherKeys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_') && !orderedKeys.includes(k) && k !== 'symbol');
+            const keys = [...orderedKeys, ...otherKeys];
             
             let html = `<table><thead><tr>
                 <th>#</th>
@@ -1641,26 +1658,46 @@ async def dashboard():
                 const rowClass = getRowClass(r.symbol, highPrice);
                 const recordDate = r.analysis_date || r.date || r.level_date || (r.saved_at||'').substring(0,10) || '';
                 const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
-                const rrr = r.risk_reward_ratio || 0;
+                
+                // Calculate RRR from entry, sl, tp if not already present
+                let rrr = r.risk_reward_ratio || 0;
+                if (rrr === 0 && r.entry_price && r.stop_loss && r.target_price) {
+                    const risk = Math.abs(r.entry_price - r.stop_loss);
+                    const reward = Math.abs(r.target_price - r.entry_price);
+                    if (risk > 0) rrr = reward / risk;
+                }
                 const rrrClass = getRRRClass(rrr);
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
+                
+                // Format values for each key
+                const keyValues = keys.map(k => {
+                    let val = r[k];
+                    if (val === undefined || val === null) val = '';
+                    if (k === 'gape' && val !== '') {
+                        return `<td style="color:#00d4ff;font-weight:bold;">${Number(val).toFixed(2)}</td>`;
+                    }
+                    if (k === 'diff' && val !== '') {
+                        return `<td style="color:#ffd700;font-weight:bold;">${val > 0 ? '+' : ''}${Number(val).toFixed(2)}</td>`;
+                    }
+                    if (typeof val === 'number') {
+                        if (k === 'high' || k === 'low' || k === 'close' || k === 'current_price') {
+                            val = val.toFixed(2);
+                        } else {
+                            val = val.toFixed(2);
+                        }
+                    }
+                    // Special formatting for percentage values
+                    if (k === 'rt' && val !== '' && typeof val === 'number') {
+                        val = val.toFixed(2) + '%';
+                    }
+                    return `<td style="background:#1a1a2e;">${val}</td>`;
+                }).join('');
                 
                 html += `<tr class="${rowClass}">
                     <td>${i+1}</td>
                     <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
                     <td>${ltpDisplay}</td>
-                    ${keys.map(k => {
-                        if (k === 'diff') {
-                            return `<td style="color:#ffd700;font-weight:bold;">${r[k] !== undefined ? (r[k] > 0 ? '+' : '') + Number(r[k]).toFixed(2) : '-'}</td>`;
-                        }
-                        if (k === 'gape') {
-                            return `<td style="color:#00d4ff;font-weight:bold;">${r[k] !== undefined ? Number(r[k]).toFixed(2) : '-'}</td>`;
-                        }
-                        let val = r[k];
-                        if (val === undefined || val === null) val = '';
-                        if (typeof val === 'number') val = val.toFixed(2);
-                        return `<td style="background:#1a1a2e;">${val}</td>`;
-                    }).join('')}
+                    ${keyValues}
                     <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
                     <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
                     <td>${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
