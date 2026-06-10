@@ -1164,8 +1164,9 @@ async def dashboard():
         }
 
         function switchTab(t) {
+            const event = window.event;
             document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-            event.target.classList.add('active');
+            if (event && event.target) event.target.classList.add('active');
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
             const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
@@ -1482,7 +1483,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </table></thead><tbody>`;
+            </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const safeId = (r.symbol || '').replace(/[^a-zA-Z0-9]/g, '_');
@@ -1518,24 +1519,25 @@ async def dashboard():
                     <td>${ltpDisplay}</td>
                     <td>${r.sector||''}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
                     <td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td>
-                    <td>${r.llm_signal||''}</td><td>${(r.llm_confidence||0).toFixed(0)}%</td>
-                    <td>${r.llm_strength||''}</td><td>${r.llm_bias||''}</td><td>${r.llm_available ? '✅' : '❌'}</td>
-                    <td>${r.xgb_signal||''}</td><td>${(r.xgb_confidence||0).toFixed(0)}%</td>
-                    <td>${(r.xgb_prob_up||0).toFixed(3)}</td><td>${(r.xgb_auc||0).toFixed(3)}</td>
+                    <td>${r.llm_signal||''}</td><td style="background:#1a1a2e;">${(r.llm_confidence||0).toFixed(0)}%</td>
+                    <td>${r.llm_strength||''}</td><td style="background:#1a1a2e;">${r.llm_bias||''}</td>
+                    <td>${r.llm_available ? '✅' : '❌'}</td>
+                    <td>${r.xgb_signal||''}</td><td style="background:#1a1a2e;">${(r.xgb_confidence||0).toFixed(0)}%</td>
+                    <td>${(r.xgb_prob_up||0).toFixed(3)}</td><td style="background:#1a1a2e;">${(r.xgb_auc||0).toFixed(3)}</td>
                     <td>${r.xgb_available ? '✅' : '❌'}</td>
-                    <td>${r.ppo_signal||''}</td><td>${(r.ppo_confidence||0).toFixed(0)}%</td>
-                    <td>${r.ppo_available ? '✅' : '❌'}</td><td>${r.ppo_weight||0}</td>
-                    <td>${(r.agentic_score||0).toFixed(1)}</td><td>${r.agentic_bias||''}</td>
+                    <td>${r.ppo_signal||''}</td><td style="background:#1a1a2e;">${(r.ppo_confidence||0).toFixed(0)}%</td>
+                    <td>${r.ppo_available ? '✅' : '❌'}</td><td style="background:#1a1a2e;">${r.ppo_weight||0}</td>
+                    <td>${(r.agentic_score||0).toFixed(1)}</td><td style="background:#1a1a2e;">${r.agentic_bias||''}</td>
                     <td>${r.agentic_available ? '✅' : '❌'}</td>
-                    <td>${(r.elliott_accuracy||0).toFixed(1)}%</td><td>${r.elliott_total_predictions||0}</td>
-                    <td style="font-size:0.65em;">${(r.elliott_wave_count||'').substring(0,15)}</td>
-                    <td style="font-size:0.65em;max-width:100px;overflow:hidden;">${(r.elliott_sub_waves||'').substring(0,20)}</td>
-                    <td>${r.elliott_current_wave||''}</td><td>${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
-                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td><td>${r.elliott_wave_position||''}</td>
+                    <td>${(r.elliott_accuracy||0).toFixed(1)}%</td><td style="background:#1a1a2e;">${r.elliott_total_predictions||0}</td>
+                    <td style="font-size:0.65em;background:#1a1a2e;">${(r.elliott_wave_count||'').substring(0,15)}</td>
+                    <td style="font-size:0.65em;max-width:100px;overflow:hidden;background:#1a1a2e;">${(r.elliott_sub_waves||'').substring(0,20)}</td>
+                    <td>${r.elliott_current_wave||''}</td><td style="background:#1a1a2e;">${(r.elliott_wave_confidence||0).toFixed(0)}%</td>
+                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td><td style="background:#1a1a2e;">${r.elliott_wave_position||''}</td>
                     <td style="color:#ffd700;font-weight:bold;">${r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-'}</td>
                     <td style="color:#00d4ff;font-weight:bold;">${r.gape !== undefined ? r.gape.toFixed(2) : '-'}</td>
-                    <td>${entryCell}</td><td>${slCell}</td><td>${tpCell}</td>
-                    <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
+                    <td>${entryCell}</td><td style="background:#1a1a2e;">${slCell}</td>
+                    <td>${tpCell}</td><td class="${rrrClass}" style="background:#1a1a2e;"><strong>${rrr.toFixed(2)}</strong></td>
                     <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
                     <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
                     <td>${actionCell}</td>
@@ -1550,7 +1552,7 @@ async def dashboard():
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
             
-            let html = `<tr><thead><tr>
+            let html = `</table><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
                 <th>Sector</th><th>LTP</th>
@@ -1565,7 +1567,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </table></thead><tbody>`;
+            </tr></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const highPrice = r.high || r.daily_last_high || r.weekly_curr_high || 0;
@@ -1586,14 +1588,14 @@ async def dashboard():
                     <td>${r.sector || ''}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
-                    <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
+                    <td>${r.weekly_divergence || ''}</td><td style="background:#1a1a2e;">${r.weekly_strength_label || ''}</td>
                     <td>${r.weekly_strength_score || 0}</td>
-                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td><td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td><td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td><td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
-                    <td>${r.weekly_prev_date || ''}</td><td>${r.weekly_curr_date || ''}</td>
-                    <td>${r.daily_divergence_type || ''}</td><td>${r.daily_divergence_strength || ''}</td>
-                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td><td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td><td style="background:#1a1a2e;">${(r.weekly_curr_low || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td><td style="background:#1a1a2e;">${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
+                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td><td style="background:#1a1a2e;">+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
+                    <td>${r.weekly_prev_date || ''}</td><td style="background:#1a1a2e;">${r.weekly_curr_date || ''}</td>
+                    <td>${r.daily_divergence_type || ''}</td><td style="background:#1a1a2e;">${r.daily_divergence_strength || ''}</td>
+                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td><td style="background:#1a1a2e;">${(r.daily_prev_rsi || 0).toFixed(2)}</td>
                     <td style="color:#ffd700;font-weight:bold;">${r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-'}</td>
                     <td style="color:#00d4ff;font-weight:bold;">${r.gape !== undefined ? r.gape.toFixed(2) : '-'}</td>
                     <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
@@ -1611,7 +1613,7 @@ async def dashboard():
 
         function renderGenericTable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
+            if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
             
             const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at','p1_date','p2_date','level_date','level_price','type','high_x','high_y','no','prev_high','swing_highs_count','swing_highs_details','uptrand_date','SL','buy','dd','dl','No','low'];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
@@ -1654,7 +1656,10 @@ async def dashboard():
                         if (k === 'gape') {
                             return `<td style="color:#00d4ff;font-weight:bold;">${r[k] !== undefined ? Number(r[k]).toFixed(2) : '-'}</td>`;
                         }
-                        return `<td>${r[k]??''}</td>`;
+                        let val = r[k];
+                        if (val === undefined || val === null) val = '';
+                        if (typeof val === 'number') val = val.toFixed(2);
+                        return `<td style="background:#1a1a2e;">${val}</td>`;
                     }).join('')}
                     <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
                     <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
