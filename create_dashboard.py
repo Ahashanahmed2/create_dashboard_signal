@@ -3,7 +3,7 @@ create_dashboard.py
 ✅ All Tabs with LTP + No Duplicate Date
 ✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
 ✅ DSE Website Market Status Check - FIXED
-✅ AI Signals (37 cols) + SWRSI + S/R + MACD + EMA 21 + Daily Buy
+✅ AI Signals (37 cols) + SWRSI + S/R + EMA 21 + Daily Buy
 ✅ S/R date selector FIXED (uses analysis_date like all other tabs)
 ✅ LTP Alert Modal + Delete All + Edit buttons
 ✅ Trade Management Modal with Entry/SL/TP/Exposure/Risk%
@@ -923,7 +923,6 @@ async def dashboard():
         <div class="tab active" onclick="switchTab('ai_signals')">🤖 AI Signals</div>
         <div class="tab" onclick="switchTab('swrsi')">🔍 SWRSI</div>
         <div class="tab" onclick="switchTab('support')">📊 S/R</div>
-        <div class="tab" onclick="switchTab('macd')">📉 MACD</div>
         <div class="tab" onclick="switchTab('ema')">📈 EMA 21</div>
         <div class="tab" onclick="switchTab('buy')">✅ Daily Buy</div>
     </div>
@@ -1015,7 +1014,6 @@ async def dashboard():
             ai_signals: 'daily_ai_signals', 
             swrsi: 'swrsi_signals', 
             support: 'support_resistance', 
-            macd: 'macd_signals', 
             ema: 'ema_21_signals', 
             buy: 'daily_buy_signals' 
         };
@@ -1149,7 +1147,7 @@ async def dashboard():
                 const r = await fetch(url); const j = await r.json();
                 currentData = j.signals || [];
             } else {
-                const map = { support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+                const map = { support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
                 let url = `/api/generic-data?collection=${map[currentTab]}&limit=500${sortParam}`;
                 if (date) url += `&date=${date}`;
                 if (symbol) url += `&symbol=${symbol}`;
@@ -1170,7 +1168,7 @@ async def dashboard():
             event.target.classList.add('active');
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
             loadDates(map[t]);
             loadCurrentTab();
         }
@@ -1456,7 +1454,7 @@ async def dashboard():
 
         async function deleteRecord(symbol, date, tab = 'ai_signals') {
             if (!confirm(`Delete ${symbol}?`)) return;
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
             await fetch(`/api/delete-signal?collection=${map[tab]}&symbol=${symbol}&date=${date}`, { method: 'DELETE' });
             loadCurrentTab();
         }
@@ -1484,7 +1482,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </tr></thead><tbody>`;
+            </table></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const safeId = (r.symbol || '').replace(/[^a-zA-Z0-9]/g, '_');
@@ -1513,8 +1511,11 @@ async def dashboard():
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
                 html += `<tr class="${rowClass}">
-                    <td>${i+1}</td><td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
-                    <td>${r.analysis_date||''}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${ltpDisplay}</td>
+                    <td>${i+1}</td>
+                    <td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
+                    <td>${r.analysis_date||''}</td>
+                    <td>${(r.current_price||0).toFixed(2)}</td>
+                    <td>${ltpDisplay}</td>
                     <td>${r.sector||''}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
                     <td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td>
                     <td>${r.llm_signal||''}</td><td>${(r.llm_confidence||0).toFixed(0)}%</td>
@@ -1549,7 +1550,7 @@ async def dashboard():
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
             
-            let html = `<table><thead><tr>
+            let html = `<tr><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
                 <th>Sector</th><th>LTP</th>
@@ -1564,7 +1565,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </tr></thead><tbody>`;
+            </table></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const highPrice = r.high || r.daily_last_high || r.weekly_curr_high || 0;
@@ -1580,7 +1581,9 @@ async def dashboard():
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
                 html += `<tr class="${rowClass}">
-                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td><td>${r.sector || ''}</td>
+                    <td>${i+1}</td>
+                    <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
+                    <td>${r.sector || ''}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
                     <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
@@ -1625,7 +1628,7 @@ async def dashboard():
                 }).join('')}
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </tr></thead><tbody>`;
+            </table></thead><tbody>`;
             
             currentData.forEach((r, i) => {
                 const highPrice = r.high || r.current_high || r.breakout_high || r.last_high || 0;
