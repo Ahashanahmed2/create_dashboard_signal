@@ -321,12 +321,12 @@ async def market_status():
     }
 
 
-# LTP Cache
-ltp_cache = {"data": {}, "timestamp": None}
+# LTP Cache - গত ডাটা সংরক্ষণের জন্য
+ltp_cache = {"data": {}, "timestamp": None, "last_valid_data": {}}
 
 @app.get("/api/dse-ltp")
 async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
-    """DSE থেকে LTP ডাটা ফেচ করুন - মার্কেট বন্ধ থাকলেও ডাটা ফেচ করবে"""
+    """DSE থেকে LTP ডাটা ফেচ করুন - মার্কেট বন্ধ থাকলেও শেষ ডাটা দেখাবে"""
 
     market_is_open = is_dse_market_open()
     force_refresh = force is not None
@@ -339,13 +339,16 @@ async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
             if age < 30 and ltp_cache["data"]:
                 print(f"[LTP] Using cache ({age:.0f}s old)")
                 return ltp_cache["data"]
-        # মার্কেট বন্ধ থাকলে ৫ মিনিটের ক্যাশ
+        # মার্কেট বন্ধ থাকলে ক্যাশড ডাটা রিটার্ন করুন
         else:
-            if age < 300 and ltp_cache["data"]:
-                print(f"[LTP] Using cache ({age:.0f}s old) - market closed")
-                return ltp_cache["data"]
+            if ltp_cache["data"]:
+                print(f"[LTP] Market closed, returning cached data from {ltp_cache['timestamp']}")
+                result = ltp_cache["data"].copy()
+                result["status"] = "market_closed_cached"
+                result["source"] = "cache_last_valid"
+                return result
 
-    print(f"[LTP] Fetching fresh data... (force={force_refresh})")
+    print(f"[LTP] Fetching fresh data from DSE... (force={force_refresh})")
 
     ltp_data = {}
     session = requests.Session()
@@ -355,11 +358,13 @@ async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
         'Accept-Language': 'en-US,en;q=0.5',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
     })
 
     # পদ্ধতি ১: DSE AJAX API - একাধিক পেজ থেকে ডাটা
     data_fetched = False
+    all_pages_data = {}
 
     try:
         for page in range(1, 6):  # 5 পেজ পর্যন্ত চেষ্টা
@@ -367,7 +372,7 @@ async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
                 response = session.get(
                     f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}&_={int(time.time()*1000)}',
                     headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
-                    timeout=10
+                    timeout=15
                 )
 
                 if response.status_code == 200:
@@ -384,7 +389,7 @@ async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
                             cols = row.find_all('td')
                             if len(cols) >= 3:
                                 try:
-                                    # সিম্বল - বিভিন্ন লোকেশন থেকে ট্রাই
+                                    # সিম্বল
                                     symbol = None
                                     for col_idx in [1, 0, 2]:
                                         if len(cols) > col_idx:
@@ -398,7 +403,7 @@ async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
                                                     symbol = text
                                                     break
 
-                                    # LTP - বিভিন্ন লোকেশন থেকে ট্রাই
+                                    # LTP
                                     ltp = None
                                     for col_idx in [2, 3, 4, 5]:
                                         if len(cols) > col_idx:
@@ -412,101 +417,111 @@ async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
 
                                     if symbol and ltp:
                                         symbol = symbol.upper().strip()
-                                        ltp_data[symbol] = ltp
+                                        all_pages_data[symbol] = ltp
                                         page_has_data = True
                                         data_fetched = True
                                 except:
                                     continue
 
                     if not page_has_data:
-                        break  # এই পেজে ডাটা নেই, আর পেজ চেক করার দরকার নেই
+                        break
 
             except Exception as e:
                 print(f"[LTP] Page {page} failed: {e}")
                 break
 
         if data_fetched:
+            ltp_data = all_pages_data
             status = "live" if market_is_open else "closed_with_data"
-            print(f"[LTP] ✅ Successfully fetched {len(ltp_data)} symbols (Market {'Open' if market_is_open else 'Closed'})")
-            result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api_multipage"}
+            print(f"[LTP] ✅ Successfully fetched {len(ltp_data)} symbols from DSE")
+            result = {
+                "status": status, 
+                "total_symbols": len(ltp_data), 
+                "ltp_data": ltp_data, 
+                "source": "dse_live",
+                "timestamp": time.time()
+            }
             ltp_cache["data"] = result
             ltp_cache["timestamp"] = get_bd_time()
+            ltp_cache["last_valid_data"] = ltp_data.copy()
             return result
 
     except Exception as e:
         print(f"[LTP] Method 1 failed: {e}")
 
     # পদ্ধতি ২: LTP পেজ থেকে সরাসরি স্ক্র্যাপিং
-    try:
+    if not data_fetched:
         try:
             session.get('https://www.dsebd.org/', timeout=10)
-            time.sleep(1.5)
-        except:
-            pass
+            time.sleep(2)
 
-        response = session.get(
-            'https://www.dsebd.org/latest_share_price_scroll_by_ltp.php',
-            timeout=15
-        )
+            response = session.get(
+                'https://www.dsebd.org/latest_share_price_scroll_by_ltp.php',
+                timeout=20
+            )
 
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
 
-            for table in soup.find_all('table'):
-                rows = table.find_all('tr')
-                for row in rows:
-                    cols = row.find_all('td')
-                    if len(cols) >= 3:
-                        try:
-                            symbol = None
-                            # বিভিন্ন কলাম থেকে সিম্বল খুঁজুন
-                            for col_idx in [1, 0]:
-                                if len(cols) > col_idx:
-                                    link = cols[col_idx].find('a')
-                                    if link:
-                                        symbol = link.text.strip()
-                                        break
-                                    else:
-                                        text = cols[col_idx].get_text(strip=True)
-                                        if text and len(text) >= 2 and text[0].isalpha():
-                                            symbol = text
+                for table in soup.find_all('table'):
+                    rows = table.find_all('tr')
+                    for row in rows:
+                        cols = row.find_all('td')
+                        if len(cols) >= 3:
+                            try:
+                                symbol = None
+                                for col_idx in [1, 0]:
+                                    if len(cols) > col_idx:
+                                        link = cols[col_idx].find('a')
+                                        if link:
+                                            symbol = link.text.strip()
                                             break
+                                        else:
+                                            text = cols[col_idx].get_text(strip=True)
+                                            if text and len(text) >= 2 and text[0].isalpha():
+                                                symbol = text
+                                                break
 
-                            # বিভিন্ন কলাম থেকে LTP খুঁজুন
-                            ltp = None
-                            for col_idx in [5, 4, 3, 2]:
-                                if len(cols) > col_idx:
-                                    ltp_text = cols[col_idx].get_text(strip=True).replace(',', '')
-                                    try:
-                                        ltp = float(ltp_text)
-                                        if 0.1 < ltp < 50000:
-                                            break
-                                    except:
-                                        continue
+                                ltp = None
+                                for col_idx in [5, 4, 3, 2]:
+                                    if len(cols) > col_idx:
+                                        ltp_text = cols[col_idx].get_text(strip=True).replace(',', '')
+                                        try:
+                                            ltp = float(ltp_text)
+                                            if 0.1 < ltp < 50000:
+                                                break
+                                        except:
+                                            continue
 
-                            if symbol and ltp:
-                                ltp_data[symbol.upper()] = ltp
-                                data_fetched = True
-                        except:
-                            continue
+                                if symbol and ltp:
+                                    ltp_data[symbol.upper()] = ltp
+                                    data_fetched = True
+                            except:
+                                continue
 
-        if data_fetched:
-            status = "live" if market_is_open else "closed_with_data"
-            print(f"[LTP] ✅ Method 2: Fetched {len(ltp_data)} symbols (Market {'Open' if market_is_open else 'Closed'})")
-            result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "html_table"}
-            ltp_cache["data"] = result
-            ltp_cache["timestamp"] = get_bd_time()
-            return result
+            if data_fetched:
+                print(f"[LTP] ✅ Method 2: Fetched {len(ltp_data)} symbols")
+                result = {
+                    "status": "live" if market_is_open else "closed_with_data", 
+                    "total_symbols": len(ltp_data), 
+                    "ltp_data": ltp_data, 
+                    "source": "dse_html_table",
+                    "timestamp": time.time()
+                }
+                ltp_cache["data"] = result
+                ltp_cache["timestamp"] = get_bd_time()
+                ltp_cache["last_valid_data"] = ltp_data.copy()
+                return result
 
-    except Exception as e:
-        print(f"[LTP] Method 2 failed: {e}")
+        except Exception as e:
+            print(f"[LTP] Method 2 failed: {e}")
 
-    # পদ্ধতি ৩: DSE মোবাইল API (মার্কেট বন্ধ থাকলেও কাজ করতে পারে)
+    # পদ্ধতি ৩: DSE মোবাইল API
     if not data_fetched:
         try:
             mobile_response = session.get(
                 'https://www.dsebd.org/mobile.php',
-                timeout=10
+                timeout=15
             )
 
             if mobile_response.status_code == 200:
@@ -528,35 +543,42 @@ async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
                                 continue
 
                 if data_fetched:
-                    print(f"[LTP] ✅ Method 3 (Mobile API): Fetched {len(ltp_data)} symbols")
+                    print(f"[LTP] ✅ Method 3: Fetched {len(ltp_data)} symbols from mobile API")
                     result = {
-                        "status": "closed_with_data" if not market_is_open else "live",
+                        "status": "live" if market_is_open else "closed_with_data",
                         "total_symbols": len(ltp_data),
                         "ltp_data": ltp_data,
-                        "source": "mobile_api"
+                        "source": "dse_mobile",
+                        "timestamp": time.time()
                     }
                     ltp_cache["data"] = result
                     ltp_cache["timestamp"] = get_bd_time()
+                    ltp_cache["last_valid_data"] = ltp_data.copy()
                     return result
 
         except Exception as e:
             print(f"[LTP] Method 3 failed: {e}")
 
-    # কোনো ডাটা পাওয়া যায়নি - ক্যাশ চেক
-    if not data_fetched and ltp_cache["data"]:
-        print(f"[LTP] ⚠️ No fresh data. Using cached data from {ltp_cache['timestamp']}")
-        cached_result = ltp_cache["data"].copy()
-        cached_result["status"] = "cached"
-        cached_result["source"] = "cache_fallback"
+    # কোনো ডাটা পাওয়া যায়নি - ক্যাশ থেকে গত ডাটা রিটার্ন করুন
+    if ltp_cache["last_valid_data"]:
+        print(f"[LTP] ⚠️ No fresh data. Returning last valid data from {ltp_cache['timestamp']}")
+        cached_result = {
+            "status": "last_valid",
+            "total_symbols": len(ltp_cache["last_valid_data"]),
+            "ltp_data": ltp_cache["last_valid_data"],
+            "source": "cache_last_valid",
+            "message": "Market may be closed or DSE website unreachable"
+        }
         return cached_result
 
     # একদমই কোনো ডাটা নেই
-    print(f"[LTP] ❌ Failed to fetch any data. Market status: {'Open' if market_is_open else 'Closed'}")
+    print(f"[LTP] ❌ Failed to fetch any data from DSE")
     return {
         "status": "error",
-        "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি",
+        "message": "Unable to fetch LTP data from DSE. Please check internet connection.",
         "ltp_data": {},
-        "source": "none"
+        "source": "none",
+        "timestamp": time.time()
     }
 
 # ================================
@@ -1555,7 +1577,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </table></thead><tbody>`;
+            </tr></thead><tbody>`;
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
@@ -1600,17 +1622,17 @@ async def dashboard():
                     <td>${r.sector || ''}</td>
                     <td class="${getSignalClass(r.final_signal)}" style="background:#1a1a2e;text-align:center;">${r.final_signal || ''}</td>
                     <td style="text-align:center;"><strong>${(r.final_combined_score || 0).toFixed(1)}</strong></td>
-                    <td>${r.llm_signal || ''}</td>
+                    <td style="text-align:center;">${r.llm_signal || ''}</td>
                     <td style="background:#1a1a2e;text-align:right;">${(r.llm_confidence || 0).toFixed(0)}%</td>
-                    <td>${r.llm_strength || ''}</td>
+                    <td style="text-align:center;">${r.llm_strength || ''}</td>
                     <td style="background:#1a1a2e;text-align:center;">${r.llm_bias || ''}</td>
                     <td style="text-align:center;">${r.llm_available ? '✅' : '❌'}</td>
-                    <td>${r.xgb_signal || ''}<td>
+                    <td style="text-align:center;">${r.xgb_signal || ''}</td>
                     <td style="background:#1a1a2e;text-align:right;">${(r.xgb_confidence || 0).toFixed(0)}%</td>
                     <td style="text-align:right;">${(r.xgb_prob_up || 0).toFixed(3)}</td>
                     <td style="background:#1a1a2e;text-align:right;">${(r.xgb_auc || 0).toFixed(3)}</td>
                     <td style="text-align:center;">${r.xgb_available ? '✅' : '❌'}</td>
-                    <td>${r.ppo_signal || ''}</td>
+                    <td style="text-align:center;">${r.ppo_signal || ''}</td>
                     <td style="background:#1a1a2e;text-align:right;">${(r.ppo_confidence || 0).toFixed(0)}%</td>
                     <td style="text-align:center;">${r.ppo_available ? '✅' : '❌'}</td>
                     <td style="background:#1a1a2e;text-align:center;">${r.ppo_weight || 0}</td>
@@ -1621,7 +1643,7 @@ async def dashboard():
                     <td style="background:#1a1a2e;text-align:center;">${r.elliott_total_predictions || 0}</td>
                     <td style="font-size:0.65em;background:#1a1a2e;text-align:center;">${(r.elliott_wave_count || '').substring(0,15)}</td>
                     <td style="font-size:0.65em;max-width:100px;overflow:hidden;background:#1a1a2e;text-align:center;">${(r.elliott_sub_waves || '').substring(0,20)}</td>
-                    <td>${r.elliott_current_wave || ''}</td>
+                    <td style="text-align:center;">${r.elliott_current_wave || ''}</td>
                     <td style="background:#1a1a2e;text-align:right;">${(r.elliott_wave_confidence || 0).toFixed(0)}%</td>
                     <td style="text-align:center;">${r.elliott_is_bullish ? '✅' : '❌'}</td>
                     <td style="background:#1a1a2e;text-align:center;">${r.elliott_wave_position || ''}</td>
@@ -1661,7 +1683,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </tr></thead><tbody>`;
+            </table></thead><tbody>`;
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
@@ -1730,7 +1752,7 @@ async def dashboard():
             const otherKeys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_') && !orderedKeys.includes(k) && k !== 'symbol');
             const keys = [...orderedKeys, ...otherKeys];
             
-            let html = `<table><thead><tr>
+            let html = `<tr><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
                 <th>LTP</th>`;
@@ -1801,7 +1823,7 @@ async def dashboard():
                     <td style="text-align:center;"><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${recordDate}','${currentTab}')">🗑️</button></td>
                 </tr>`;
             }
-            html += '</tbody></table>';
+            html += '</tbody><tr>';
             div.innerHTML = html;
             document.getElementById('recordCount').textContent = `(${currentData.length} records)`;
         }
