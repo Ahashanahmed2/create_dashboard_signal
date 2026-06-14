@@ -12,7 +12,7 @@ create_dashboard.py
 ✅ LTP > High Breakout Row Highlight (GREEN)
 ✅ Default Sort: diff ASC, gape DESC
 ✅ LTP Data Available Even When Market Closed
-✅ LTP updates every 30 seconds during market hours
+✅ LTP updates every 30 seconds with cache
 """
 
 import os
@@ -334,7 +334,7 @@ async def get_dse_ltp(force: int = Query(None)):
     # ক্যাশ চেক - force_refresh থাকলে ক্যাশ বাইপাস
     if not force_refresh and ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
-        # মার্কেট খোলা থাকলে ৩০ সেকেন্ডের ক্যাশ (আগে ছিল ১২০ সেকেন্ড)
+        # মার্কেট খোলা থাকলে ৩০ সেকেন্ডের ক্যাশ
         if market_is_open:
             if age < 30 and ltp_cache["data"]:
                 print(f"[LTP] Using cache ({age:.0f}s old)")
@@ -1029,21 +1029,22 @@ async def dashboard():
         loadDates(COLLECTION_MAP[currentTab]);
         loadCurrentTab();
         checkMarketStatus();
-        loadDseLtp();
+        loadDseLtp(true);
         loadAlertRules();
         setInterval(checkMarketStatus, 60000);
         
-        // Start LTP update interval (30 seconds when market open, 5 minutes when closed)
+        // Start LTP update interval (30 seconds)
         startLtpUpdateInterval();
         
         updateSortStatus();
 
         function startLtpUpdateInterval() {
             if (ltpUpdateInterval) clearInterval(ltpUpdateInterval);
-            // Update every 30 seconds
+            // Update every 30 seconds with force refresh
             ltpUpdateInterval = setInterval(function() { 
                 loadDseLtp(true); 
             }, 30000);
+            console.log('LTP update interval started (30 seconds)');
         }
 
         function loadAlertRules() {
@@ -1122,16 +1123,19 @@ async def dashboard():
             try { 
                 let url = '/api/dse-ltp';
                 if (forceRefresh) {
-                    url += '?force=' + Date.now();
+                    url += '?force=1&_=' + Date.now();
+                } else {
+                    url += '?_=' + Date.now();
                 }
-                const r = await fetch(url); 
+                const r = await fetch(url, {
+                    headers: {
+                        'Cache-Control': 'no-cache'
+                    }
+                }); 
                 const j = await r.json();
+                console.log('LTP:', j.status, '| Symbols:', j.ltp_data ? Object.keys(j.ltp_data).length : 0, '| Source:', j.source);
                 if (j.ltp_data && Object.keys(j.ltp_data).length > 0) {
                     dseLtpData = j.ltp_data;
-                    console.log('LTP Updated:', Object.keys(dseLtpData).length, 'symbols, source:', j.source);
-                    renderCurrentTab();
-                } else if (j.status === 'cached' && dseLtpData && Object.keys(dseLtpData).length > 0) {
-                    console.log('LTP using cached data');
                     renderCurrentTab();
                 }
             } catch(e) {
@@ -1600,7 +1604,7 @@ async def dashboard():
                     <td>${actionCell}</td>
                 </tr>`;
             }
-            html += '</tbody></table>';
+            html += '</tbody><tr>';
             div.innerHTML = html;
             document.getElementById('recordCount').textContent = `(${currentData.length} signals)`;
         }
@@ -1694,7 +1698,7 @@ async def dashboard():
             const otherKeys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_') && !orderedKeys.includes(k) && k !== 'symbol');
             const keys = [...orderedKeys, ...otherKeys];
             
-            let html = `<table><thead><tr>
+            let html = `</table><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
                 <th>LTP</th>`;
