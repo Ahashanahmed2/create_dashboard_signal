@@ -12,6 +12,7 @@ create_dashboard.py
 ✅ LTP > High Breakout Row Highlight (GREEN)
 ✅ Default Sort: diff ASC, gape DESC
 ✅ LTP Data Available Even When Market Closed
+✅ Tabs working fixed
 """
 
 import os
@@ -581,11 +582,11 @@ async def dashboard():
     </div>
     <div id="alertBox" class="alert-box">⚠️ DSE CLOSING IN 10 MINUTES!</div>
     <div class="tabs">
-        <div class="tab active" onclick="switchTab('ai_signals')">🤖 AI Signals</div>
-        <div class="tab" onclick="switchTab('swrsi')">🔍 SWRSI</div>
-        <div class="tab" onclick="switchTab('support')">📊 S/R</div>
-        <div class="tab" onclick="switchTab('ema')">📈 EMA 21</div>
-        <div class="tab" onclick="switchTab('buy')">✅ Daily Buy</div>
+        <div class="tab active" data-tab="ai_signals">🤖 AI Signals</div>
+        <div class="tab" data-tab="swrsi">🔍 SWRSI</div>
+        <div class="tab" data-tab="support">📊 S/R</div>
+        <div class="tab" data-tab="ema">📈 EMA 21</div>
+        <div class="tab" data-tab="buy">✅ Daily Buy</div>
     </div>
     <div class="controls">
         <label>📅 Date:</label>
@@ -624,14 +625,54 @@ async def dashboard():
             buy: 'daily_buy_signals' 
         };
 
-        loadDates(COLLECTION_MAP[currentTab]);
-        loadCurrentTab();
-        checkMarketStatus();
-        loadDseLtp();
-        loadAlertRules();
-        setInterval(checkMarketStatus, 60000);
-        setInterval(function(){loadDseLtp(true);}, 30000);
-        updateSortStatus();
+        // Initialize tabs on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Add click event listeners to all tabs
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.addEventListener('click', function() {
+                    const tabId = this.getAttribute('data-tab');
+                    if (tabId) {
+                        switchTab(tabId);
+                    }
+                });
+            });
+            
+            // Load initial data
+            loadDates(COLLECTION_MAP[currentTab]);
+            loadCurrentTab();
+            checkMarketStatus();
+            loadDseLtp();
+            loadAlertRules();
+            setInterval(checkMarketStatus, 60000);
+            setInterval(function(){loadDseLtp(true);}, 30000);
+            updateSortStatus();
+        });
+
+        function switchTab(tabId) {
+            // Update current tab
+            currentTab = tabId;
+            
+            // Update active class on tabs
+            document.querySelectorAll('.tab').forEach(tab => {
+                if (tab.getAttribute('data-tab') === tabId) {
+                    tab.classList.add('active');
+                } else {
+                    tab.classList.remove('active');
+                }
+            });
+            
+            // Reset search input
+            document.getElementById('symbolSearch').value = '';
+            
+            // Reset sort (optional)
+            resetSort();
+            
+            // Load dates for the new collection
+            loadDates(COLLECTION_MAP[tabId]);
+            
+            // Load data for the new tab
+            loadCurrentTab();
+        }
 
         function loadAlertRules() {
             const saved = localStorage.getItem('ltpAlertRules');
@@ -754,27 +795,6 @@ async def dashboard():
             if (currentTab === 'ai_signals') renderAITable();
             else if (currentTab === 'swrsi') renderSWRSITable();
             else renderGenericTable();
-        }
-
-        function switchTab(t) {
-            document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-            const tabs = document.querySelectorAll('.tab');
-            const tabTexts = {
-                'ai_signals': 'AI Signals',
-                'swrsi': 'SWRSI', 
-                'support': 'S/R',
-                'ema': 'EMA 21',
-                'buy': 'Daily Buy'
-            };
-            tabs.forEach(tab => {
-                if (tab.textContent.includes(tabTexts[t])) {
-                    tab.classList.add('active');
-                }
-            });
-            currentTab = t;
-            document.getElementById('symbolSearch').value = '';
-            loadDates(COLLECTION_MAP[t]);
-            loadCurrentTab();
         }
 
         function getSignalClass(s) {
@@ -901,8 +921,8 @@ async def dashboard():
             } catch(e) { alert('Failed: ' + e.message); }
         }
 
-        function startEdit(symbol, date) { editingRow = { symbol: symbol, date: date }; renderAITable(); }
-        function cancelEdit() { editingRow = null; renderAITable(); }
+        function startEdit(symbol, date) { editingRow = { symbol: symbol, date: date }; renderCurrentTab(); }
+        function cancelEdit() { editingRow = null; renderCurrentTab(); }
 
         async function saveEdit(symbol, date) {
             const safeId = symbol.replace(/[^a-zA-Z0-9]/g, '_');
@@ -970,7 +990,7 @@ async def dashboard():
         }
 
         async function deleteRecord(symbol, date, tab) {
-            tab = tab || 'ai_signals';
+            tab = tab || currentTab;
             if (!confirm('Delete ' + symbol + '?')) return;
             await fetch('/api/delete-signal?collection=' + COLLECTION_MAP[tab] + '&symbol=' + symbol + '&date=' + date, { method: 'DELETE' });
             loadCurrentTab();
@@ -980,7 +1000,7 @@ async def dashboard():
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="text-align:center;padding:40px;">No data</p>'; return; }
             
-            let html = '<table><thead><tr><th>#</th><th onclick="handleSort(\'symbol\')">Symbol' + getSortIndicator('symbol') + '</th><th>Date</th><th>Price</th><th>LTP</th><th>Sector</th><th>Signal</th><th>Score</th><th>LLM</th><th>LLM%</th><th>XGB</th><th>XGB%</th><th>PPO</th><th>PPO%</th><th>Agentic</th><th>Diff</th><th>Gape</th><th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
+            let html = '<table><thead><tr><th>#</th><th onclick="handleSort(\'symbol\')">Symbol' + getSortIndicator('symbol') + '</th><th>Date</th><th>Price</th><th>LTP</th><th>Sector</th><th>Signal</th><th>Score</th><th>LLM</th><th>LLM%</th><th>XGB</th><th>XGB%</th><th>PPO</th><th>PPO%</th><th>Agentic</th><th onclick="handleSort(\'diff\')">Diff' + getSortIndicator('diff') + '</th><th onclick="handleSort(\'gape\')">Gape' + getSortIndicator('gape') + '</th><th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
