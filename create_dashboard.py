@@ -326,48 +326,66 @@ ltp_cache = {"data": {}, "timestamp": None}
 
 def parse_dse_table(html_text):
     """
-    New parser matching the exact DSE table structure:
-    <table class="table table-bordered background-white shares-table">
-        <tbody>
-            <tr> (header) </tr>
-            <tr> data rows with td: #, TRADING CODE (<a>), LTP*, HIGH, LOW, CLOSEP*, YCP*, %CHANGE, TRADE, VALUE, VOLUME
-        </tbody>
-    </table>
-    LTP is in 3rd td (index 2), symbol is in 2nd td's <a> tag.
+    Robust parser for DSE LTP data.
+    First tries exact 'shares-table' class, then falls back to generic detection.
+    Symbol: 2nd td's <a> tag (index 1)
+    LTP: 3rd td (index 2)
     """
     soup = BeautifulSoup(html_text, 'html.parser')
     ltp_data = {}
-    # Find the specific table by class
+
+    # Method 1: target specific table class
     tables = soup.find_all('table', class_='shares-table')
     if not tables:
-        # fallback: any table
-        tables = soup.find_all('table')
+        # Fallback: find any table that looks like DSE data table
+        tables = soup.find_all('table', class_=re.compile(r'table', re.I))
+    
     for table in tables:
-        # skip header row (first tr) or check for th
-        rows = table.find_all('tr')[1:]  # assuming first row is header
+        rows = table.find_all('tr')
         for row in rows:
+            # Skip header row (contains <th>)
+            if row.find('th'):
+                continue
+                
             cells = row.find_all('td')
             if len(cells) < 3:
                 continue
-            # Symbol extraction: second cell (index 1) contains <a>
-            symbol_cell = cells[1]
-            a_tag = symbol_cell.find('a')
-            if a_tag:
-                symbol = a_tag.text.strip()
-            else:
-                symbol = symbol_cell.get_text(strip=True)
+                
+            # Symbol extraction: 2nd cell (index 1) contains <a> tag
+            symbol = None
+            if len(cells) > 1:
+                a_tag = cells[1].find('a')
+                if a_tag:
+                    symbol = a_tag.text.strip()
+                else:
+                    # Try direct text if no <a> tag
+                    text = cells[1].get_text(strip=True)
+                    if text and len(text) >= 2 and text[0].isalpha():
+                        symbol = text
+            
             if not symbol:
                 continue
-            # LTP extraction: third cell (index 2)
-            ltp_cell = cells[2]
-            ltp_text = ltp_cell.get_text(strip=True).replace(',', '')
-            try:
-                ltp = float(ltp_text)
-                if ltp > 0:
-                    ltp_data[symbol.upper()] = ltp
-            except:
-                continue
+                
+            # LTP extraction: 3rd cell (index 2)
+            ltp = None
+            if len(cells) > 2:
+                ltp_text = cells[2].get_text(strip=True).replace(',', '')
+                try:
+                    ltp = float(ltp_text)
+                    if ltp <= 0 or ltp > 50000:
+                        ltp = None
+                except:
+                    pass
+            
+            if symbol and ltp:
+                ltp_data[symbol.upper()] = ltp
+        
+        # Stop after finding first table with data
+        if ltp_data:
+            break
+    
     return ltp_data
+
 
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
@@ -378,112 +396,116 @@ async def get_dse_ltp():
     # ক্যাশ চেক
     if ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
-        # মার্কেট খোলা থাকলে ২ মিনিটের ক্যাশ ব্যবহার করবে
         if market_is_open:
             if age < 120 and ltp_cache["data"]:
                 return ltp_cache["data"]
-        # মার্কেট বন্ধ থাকলে ৫ মিনিটের ক্যাশ
         else:
             if age < 300 and ltp_cache["data"]:
                 return ltp_cache["data"]
 
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
+        'Referer': 'https://www.dsebd.org/',
     })
 
     ltp_data = {}
     data_fetched = False
 
-    # Method 1: DSE AJAX API (latest_share_price_scroll_l.php) - multiple pages
-    for page in range(1, 6):
-        try:
-            resp = session.get(
-                f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}',
-                headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
-                timeout=10
-            )
-            if resp.status_code == 200:
-                page_data = parse_dse_table(resp.text)
-                if page_data:
-                    ltp_data.update(page_data)
-                    data_fetched = True
-                else:
-                    # If no data found in this page, assume no more pages
-                    break
-        except Exception as e:
-            print(f"[LTP] Page {page} failed: {e}")
-            break
+    # Method 1: সরাসরি dseX_share.php থেকে ডাটা ফেচ
+    try:
+        print("[LTP] Fetching from dseX_share.php...")
+        resp = session.get('https://dsebd.org/dseX_share.php', timeout=15)
+        if resp.status_code == 200:
+            ltp_data = parse_dse_table(resp.text)
+            if ltp_data:
+                data_fetched = True
+                print(f"[LTP] ✅ dseX_share.php: Found {len(ltp_data)} symbols")
+    except Exception as e:
+        print(f"[LTP] dseX_share.php failed: {e}")
 
+    # Method 2: latest_share_price_scroll_l.php (AJAX, multiple pages)
+    if not data_fetched:
+        for page in range(1, 6):
+            try:
+                resp = session.get(
+                    f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}',
+                    headers={'X-Requested-With': 'XMLHttpRequest'},
+                    timeout=10
+                )
+                if resp.status_code == 200:
+                    page_data = parse_dse_table(resp.text)
+                    if page_data:
+                        ltp_data.update(page_data)
+                        data_fetched = True
+                    else:
+                        break
+            except Exception as e:
+                print(f"[LTP] AJAX page {page} failed: {e}")
+                break
+        
+        if data_fetched:
+            print(f"[LTP] ✅ AJAX API: Found {len(ltp_data)} symbols")
+
+    # Method 3: latest_share_price_scroll_by_ltp.php
+    if not data_fetched:
+        try:
+            resp = session.get('https://www.dsebd.org/latest_share_price_scroll_by_ltp.php', timeout=15)
+            if resp.status_code == 200:
+                ltp_data = parse_dse_table(resp.text)
+                if ltp_data:
+                    data_fetched = True
+                    print(f"[LTP] ✅ LTP page: Found {len(ltp_data)} symbols")
+        except Exception as e:
+            print(f"[LTP] LTP page failed: {e}")
+
+    # Method 4: Mobile API
+    if not data_fetched:
+        try:
+            resp = session.get('https://www.dsebd.org/mobile.php', timeout=10)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                for table in soup.find_all('table'):
+                    for row in table.find_all('tr'):
+                        cols = row.find_all('td')
+                        if len(cols) >= 2:
+                            try:
+                                sym = cols[0].get_text(strip=True)
+                                ltp_val = float(cols[1].get_text(strip=True).replace(',', ''))
+                                if ltp_val > 0:
+                                    ltp_data[sym.upper()] = ltp_val
+                                    data_fetched = True
+                            except:
+                                continue
+                if data_fetched:
+                    print(f"[LTP] ✅ Mobile API: Found {len(ltp_data)} symbols")
+        except Exception as e:
+            print(f"[LTP] Mobile API failed: {e}")
+
+    # Return data or fallback
     if data_fetched:
         status = "live" if market_is_open else "closed_with_data"
-        print(f"[LTP] ✅ Fetched {len(ltp_data)} symbols via AJAX API (Market {'Open' if market_is_open else 'Closed'})")
-        result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api"}
+        result = {
+            "status": status,
+            "total_symbols": len(ltp_data),
+            "ltp_data": ltp_data,
+            "source": "dse_combined"
+        }
         ltp_cache["data"] = result
         ltp_cache["timestamp"] = get_bd_time()
         return result
 
-    # Method 2: LTP page (latest_share_price_scroll_by_ltp.php)
-    try:
-        # Sometimes need to hit homepage first
-        session.get('https://www.dsebd.org/', timeout=10)
-        time.sleep(1)
-        resp = session.get('https://www.dsebd.org/latest_share_price_scroll_by_ltp.php', timeout=15)
-        if resp.status_code == 200:
-            page_data = parse_dse_table(resp.text)
-            if page_data:
-                ltp_data.update(page_data)
-                data_fetched = True
-                status = "live" if market_is_open else "closed_with_data"
-                print(f"[LTP] ✅ Fetched {len(ltp_data)} symbols via LTP page (Market {'Open' if market_is_open else 'Closed'})")
-                result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ltp_page"}
-                ltp_cache["data"] = result
-                ltp_cache["timestamp"] = get_bd_time()
-                return result
-    except Exception as e:
-        print(f"[LTP] Method 2 failed: {e}")
-
-    # Method 3: Mobile API (may work when closed)
-    try:
-        resp = session.get('https://www.dsebd.org/mobile.php', timeout=10)
-        if resp.status_code == 200:
-            # Parse mobile table (likely similar structure but simpler)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for table in soup.find_all('table'):
-                rows = table.find_all('tr')
-                for row in rows:
-                    cols = row.find_all('td')
-                    if len(cols) >= 2:
-                        try:
-                            symbol = cols[0].get_text(strip=True)
-                            ltp_txt = cols[1].get_text(strip=True).replace(',', '')
-                            ltp = float(ltp_txt)
-                            if ltp > 0:
-                                ltp_data[symbol.upper()] = ltp
-                                data_fetched = True
-                        except:
-                            continue
-            if data_fetched:
-                status = "live" if market_is_open else "closed_with_data"
-                print(f"[LTP] ✅ Fetched {len(ltp_data)} symbols via Mobile API")
-                result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "mobile_api"}
-                ltp_cache["data"] = result
-                ltp_cache["timestamp"] = get_bd_time()
-                return result
-    except Exception as e:
-        print(f"[LTP] Method 3 failed: {e}")
-
-    # Fallback to cache if exists
+    # Fallback to cache
     if ltp_cache["data"]:
         print(f"[LTP] ⚠️ Using cached data from {ltp_cache['timestamp']}")
-        cached_result = ltp_cache["data"].copy()
-        cached_result["status"] = "cached"
-        cached_result["source"] = "cache_fallback"
-        return cached_result
+        cached = ltp_cache["data"].copy()
+        cached["status"] = "cached"
+        cached["source"] = "cache"
+        return cached
 
     print(f"[LTP] ❌ No data available. Market status: {'Open' if market_is_open else 'Closed'}")
     return {
