@@ -151,9 +151,17 @@ async def get_dse_ltp(force: int = Query(None)):
 
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Find table
             table = soup.find('table', class_='shares-table')
             if not table:
                 table = soup.find('table', class_='table-bordered')
+            if not table:
+                tables = soup.find_all('table')
+                for t in tables:
+                    if len(t.find_all('tr')) > 10:
+                        table = t
+                        break
 
             if table:
                 rows = table.find_all('tr')
@@ -167,13 +175,20 @@ async def get_dse_ltp(force: int = Query(None)):
                             a_tag = cols[1].find('a')
                             if a_tag:
                                 symbol = a_tag.text.strip()
+                            else:
+                                text = cols[1].get_text(strip=True)
+                                match = re.match(r'^([A-Za-z0-9\-\.\(\)]+)', text)
+                                if match:
+                                    symbol = match.group(1)
 
                             if symbol and len(symbol) >= 2:
-                                ltp_text = cols[2].get_text(strip=True).replace(',', '')
-                                ltp = float(ltp_text)
-                                if 0.1 < ltp < 50000:
-                                    ltp_data[symbol.upper()] = ltp
-                                    data_fetched = True
+                                ltp_text = cols[2].get_text(strip=True)
+                                ltp_text = re.sub(r'[^\d.]', '', ltp_text)
+                                if ltp_text:
+                                    ltp = float(ltp_text)
+                                    if 0.1 < ltp < 50000:
+                                        ltp_data[symbol.upper()] = ltp
+                                        data_fetched = True
                         except:
                             continue
 
@@ -1001,30 +1016,7 @@ async def dashboard():
                 const tpCell = isEditing ? '<input class="editable-input" id="edit-tp-' + safeId + '" value="' + ((r.target_price||0).toFixed(2)) + '">' : (r.target_price ? r.target_price.toFixed(2) : '-');
                 const actionCell = isEditing ? '<button class="save-btn" onclick="saveEdit(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">💾</button><button onclick="cancelEdit()">❌</button>' : '<button class="edit-btn" onclick="startEdit(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">✏️</button><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">🗑️</button>';
                 
-                html += '<tr class="' + rowClass + '">';
-                html += '<td>' + (i+1) + '</td>';
-                html += '<td><strong>' + (r.symbol || '') + (isEdited?' ✏️':'') + (hasTrade?' 💰':'') + breakBadge + '</strong></td>';
-                html += '<td>' + (r.analysis_date||'') + '</td>';
-                html += '<td>' + ((r.current_price||0).toFixed(2)) + '</td>';
-                html += '<td>' + ltpDisplay + '</td>';
-                html += '<td>' + (r.sector||'') + '</td>';
-                html += '<td class="' + getSignalClass(r.final_signal) + '">' + (r.final_signal||'') + '</td>';
-                html += '<td>' + ((r.final_combined_score||0).toFixed(1)) + '</td>';
-                html += '<td>' + (r.llm_signal||'') + '</td>';
-                html += '<td>' + ((r.llm_confidence||0).toFixed(0)) + '%</td>';
-                html += '<td>' + (r.xgb_signal||'') + '</td>';
-                html += '<td>' + ((r.xgb_confidence||0).toFixed(0)) + '%</td>';
-                html += '<td>' + (r.ppo_signal||'') + '</td>';
-                html += '<td>' + ((r.ppo_confidence||0).toFixed(0)) + '%</td>';
-                html += '<td>' + ((r.agentic_score||0).toFixed(1)) + '</td>';
-                html += '<td>' + (r.diff!==undefined?(r.diff>0?'+':'')+r.diff.toFixed(2):'-') + '</td>';
-                html += '<td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '</td>';
-                html += '<td>' + entryCell + '</td>';
-                html += '<td>' + slCell + '</td>';
-                html += '<td>' + tpCell + '</td>';
-                html += '<td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td>';
-                html += '<td>' + actionCell + '</td>';
-                html += '</tr>';
+                html += '<tr class="' + rowClass + '"><td>' + (i+1) + '</td><td><strong>' + (r.symbol||'') + (isEdited?' ✏️':'') + (hasTrade?' 💰':'') + breakBadge + '</strong></td><td>' + (r.analysis_date||'') + '</td><td>' + ((r.current_price||0).toFixed(2)) + '</td><td>' + ltpDisplay + '</td><td>' + (r.sector||'') + '</td><td class="' + getSignalClass(r.final_signal) + '">' + (r.final_signal||'') + '</td><td>' + ((r.final_combined_score||0).toFixed(1)) + '</td><td>' + (r.llm_signal||'') + '</td><td>' + ((r.llm_confidence||0).toFixed(0)) + '%</td><td>' + (r.xgb_signal||'') + '</td><td>' + ((r.xgb_confidence||0).toFixed(0)) + '%</td><td>' + (r.ppo_signal||'') + '</td><td>' + ((r.ppo_confidence||0).toFixed(0)) + '%</td><td>' + ((r.agentic_score||0).toFixed(1)) + '</td><td>' + (r.diff!==undefined?(r.diff>0?'+':'')+r.diff.toFixed(2):'-') + '</td><td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '</td><td>' + entryCell + '</td><td>' + slCell + '</td><td>' + tpCell + '</td><td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td><td>' + actionCell + '</td></tr>';
             }
             html += '</tbody></table>';
             div.innerHTML = html;
@@ -1047,21 +1039,7 @@ async def dashboard():
                 const rrrClass = getRRRClass(rrr);
                 const breakBadge = isLtpAboveHigh(r.symbol, highPrice) ? '🚀' : '';
                 
-                html += '<tr class="' + rowClass + '">';
-                html += '<td>' + (i+1) + '</td>';
-                html += '<td><strong>' + (r.symbol || '') + (hasTrade?' 💰':'') + breakBadge + '</strong></td>';
-                html += '<td>' + (r.sector||'') + '</td>';
-                html += '<td>' + ltpDisplay + '</td>';
-                html += '<td>' + ((r.composite_score||0).toFixed(0)) + '</td>';
-                html += '<td>' + (r.weekly_strength_label||'') + '</td>';
-                html += '<td>' + (r.diff!==undefined?(r.diff>0?'+':'')+r.diff.toFixed(2):'-') + '</td>';
-                html += '<td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '</td>';
-                html += '<td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '</td>';
-                html += '<td>' + (r.stop_loss?r.stop_loss.toFixed(2):'-') + '</td>';
-                html += '<td>' + (r.target_price?r.target_price.toFixed(2):'-') + '</td>';
-                html += '<td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td>';
-                html += '<td><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + (r.analysis_date||'') + '\',\'swrsi\')">🗑️</button></td>';
-                html += '</tr>';
+                html += '<tr class="' + rowClass + '"><td>' + (i+1) + '</td><td><strong>' + (r.symbol||'') + (hasTrade?' 💰':'') + breakBadge + '</strong></td><td>' + (r.sector||'') + '</td><td>' + ltpDisplay + '</td><td>' + ((r.composite_score||0).toFixed(0)) + '</td><td>' + (r.weekly_strength_label||'') + '</td><td>' + (r.diff!==undefined?(r.diff>0?'+':'')+r.diff.toFixed(2):'-') + '</td><td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '</td><td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '</td><td>' + (r.stop_loss?r.stop_loss.toFixed(2):'-') + '</td><td>' + (r.target_price?r.target_price.toFixed(2):'-') + '</td><td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td><td><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + (r.analysis_date||'') + '\',\'swrsi\')">🗑️</button></td></tr>';
             }
             html += '</tbody></table>';
             div.innerHTML = html;
@@ -1085,22 +1063,14 @@ async def dashboard():
                 const rrrClass = getRRRClass(rrr);
                 const breakBadge = isLtpAboveHigh(r.symbol, highPrice) ? '🚀' : '';
                 
-                html += '<tr class="' + rowClass + '">';
-                html += '<td>' + (i+1) + '</td>';
-                html += '<td><strong>' + (r.symbol || '') + (hasTrade?' 💰':'') + breakBadge + '</strong></td>';
-                html += '<td>' + ltpDisplay + '</td>';
+                html += '<tr class="' + rowClass + '"><td>' + (i+1) + '</td><td><strong>' + (r.symbol||'') + (hasTrade?' 💰':'') + breakBadge + '</strong></td><td>' + ltpDisplay + '</td>';
                 for (let k of keys) {
                     let val = r[k];
                     if (val === undefined || val === null) val = '';
                     if (typeof val === 'number') val = val.toFixed(2);
                     html += '<td>' + val + '</td>';
                 }
-                html += '<td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '</td>';
-                html += '<td>' + (r.stop_loss?r.stop_loss.toFixed(2):'-') + '</td>';
-                html += '<td>' + (r.target_price?r.target_price.toFixed(2):'-') + '</td>';
-                html += '<td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td>';
-                html += '<td><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + (r.analysis_date||r.date||'') + '\',\'' + currentTab + '\')">🗑️</button></td>';
-                html += '</tr>';
+                html += '<td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '</td><td>' + (r.stop_loss?r.stop_loss.toFixed(2):'-') + '</td><td>' + (r.target_price?r.target_price.toFixed(2):'-') + '</td><td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td><td><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + (r.analysis_date||r.date||'') + '\',\'' + currentTab + '\')">🗑️</button></td></tr>';
             }
             html += '</tbody></table>';
             div.innerHTML = html;
