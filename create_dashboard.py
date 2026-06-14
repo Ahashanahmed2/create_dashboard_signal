@@ -538,7 +538,7 @@ async def dashboard():
         .alert-box { background: #ff4757; color: #fff; padding: 15px; border-radius: 10px; margin: 15px 0; text-align: center; font-size: 1.3em; font-weight: bold; display: none; animation: pulse 1s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
         .tabs { display: flex; margin-bottom: 20px; background: #111; border-radius: 10px; overflow: hidden; flex-wrap: wrap; }
-        .tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; border-right: 1px solid #222; color: #aaa; min-width: 100px; }
+        .tab { flex: 1; padding: 12px 8px; text-align: center; cursor: pointer; border-right: 1px solid #222; color: #aaa; min-width: 80px; font-size: 13px; }
         .tab:last-child { border-right: none; }
         .tab.active { background: #1a1a2e; color: #00d4ff; font-weight: bold; }
         .controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; align-items: center; }
@@ -571,6 +571,9 @@ async def dashboard():
         .modal.open { display: flex; }
         .modal-content { background: #1a1a2e; padding: 25px; border-radius: 15px; max-width: 500px; width: 90%; }
         .trade-summary { background: #0f3460; padding: 15px; border-radius: 10px; margin: 15px 0; }
+        .rrr-high { color: #00ff88; font-weight: bold; }
+        .rrr-medium { color: #ffd700; }
+        .rrr-low { color: #ff4757; }
         @media (max-width: 768px) { .header h1 { font-size: 1.5em; } }
     </style>
 </head>
@@ -1002,7 +1005,7 @@ async def dashboard():
                 const actionCell = isEditing ? '<button class="save-btn" onclick="saveEdit(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">💾</button><button onclick="cancelEdit()">❌</button>' : '<button class="edit-btn" onclick="startEdit(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">✏️</button><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">🗑️</button>';
                 
                 html += '<tr class="' + rowClass + '">';
-                html += '<td>' + (i+1) + '</td>';
+                html += '<tr>' + (i+1) + '</td>';
                 html += '<td><strong>' + (r.symbol || '') + (isEdited?' ✏️':'') + (hasTrade?' 💰':'') + breakBadge + '</strong></td>';
                 html += '<td>' + (r.analysis_date||'') + '</td>';
                 html += '<td>' + ((r.current_price||0).toFixed(2)) + '</td>';
@@ -1073,7 +1076,7 @@ async def dashboard():
             
             const keys = Object.keys(currentData[0]).filter(k => !['_id', 'saved_at', 'analysis_date', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at'].includes(k));
             
-            let html = '<tr><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>' + keys.map(k => '<th>' + k + '</th>').join('') + '<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
+            let html = '<table><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>' + keys.map(k => '<th>' + k + '</th>').join('') + '<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
