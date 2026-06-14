@@ -326,62 +326,76 @@ ltp_cache = {"data": {}, "timestamp": None}
 
 def parse_dse_table(html_text):
     """
-    Robust parser for DSE LTP data.
-    First tries exact 'shares-table' class, then falls back to generic detection.
+    Ultra-robust parser for DSE LTP data.
+    Handles whitespace, formatting, and various table structures.
     Symbol: 2nd td's <a> tag (index 1)
     LTP: 3rd td (index 2)
     """
     soup = BeautifulSoup(html_text, 'html.parser')
     ltp_data = {}
 
-    # Method 1: target specific table class
-    tables = soup.find_all('table', class_='shares-table')
-    if not tables:
-        # Fallback: find any table that looks like DSE data table
-        tables = soup.find_all('table', class_=re.compile(r'table', re.I))
+    # Find all tables
+    all_tables = soup.find_all('table')
     
-    for table in tables:
+    for table in all_tables:
+        # Get all rows (both tr with th and tr with td)
         rows = table.find_all('tr')
+        
         for row in rows:
-            # Skip header row (contains <th>)
-            if row.find('th'):
-                continue
-                
-            cells = row.find_all('td')
+            # Get all cells (both th and td)
+            cells = row.find_all(['td', 'th'])
+            
+            # Skip header rows or rows without enough cells
             if len(cells) < 3:
                 continue
-                
-            # Symbol extraction: 2nd cell (index 1) contains <a> tag
-            symbol = None
-            if len(cells) > 1:
-                a_tag = cells[1].find('a')
-                if a_tag:
-                    symbol = a_tag.text.strip()
-                else:
-                    # Try direct text if no <a> tag
-                    text = cells[1].get_text(strip=True)
-                    if text and len(text) >= 2 and text[0].isalpha():
-                        symbol = text
             
-            if not symbol:
+            # Check if this is a header row
+            if row.find('th'):
                 continue
+            
+            # Symbol: always in the 2nd cell (index 1)
+            symbol = None
+            try:
+                symbol_cell = cells[1]
+                # Find <a> tag first
+                a_tag = symbol_cell.find('a')
+                if a_tag:
+                    symbol = a_tag.get_text(strip=True)
+                else:
+                    # If no <a> tag, get direct text
+                    symbol = symbol_cell.get_text(strip=True)
                 
-            # LTP extraction: 3rd cell (index 2)
+                # Clean symbol - remove extra whitespace
+                if symbol:
+                    symbol = ' '.join(symbol.split())
+            except:
+                continue
+            
+            if not symbol or len(symbol) < 2:
+                continue
+            
+            # LTP: always in the 3rd cell (index 2)
             ltp = None
-            if len(cells) > 2:
-                ltp_text = cells[2].get_text(strip=True).replace(',', '')
-                try:
-                    ltp = float(ltp_text)
-                    if ltp <= 0 or ltp > 50000:
-                        ltp = None
-                except:
-                    pass
+            try:
+                ltp_cell = cells[2]
+                ltp_text = ltp_cell.get_text(strip=True)
+                # Remove commas for numbers like 1,439.2
+                ltp_text = ltp_text.replace(',', '')
+                
+                # Try to convert to float
+                ltp = float(ltp_text)
+                
+                # Validate LTP
+                if ltp <= 0 or ltp > 50000:
+                    ltp = None
+            except:
+                pass
             
             if symbol and ltp:
-                ltp_data[symbol.upper()] = ltp
+                ltp_data[symbol.upper().strip()] = ltp
         
-        # Stop after finding first table with data
-        if ltp_data:
+        # If we found data in this table, stop looking
+        if len(ltp_data) > 10:
             break
     
     return ltp_data
