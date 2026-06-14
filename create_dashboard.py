@@ -299,6 +299,70 @@ async def health():
         "bangladesh_time": get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
     }
 
+@app.get("/api/test-ltp")
+async def test_ltp():
+    """LTP fetching টেস্ট করার জন্য আলাদা endpoint"""
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    session = requests.Session()
+    session.verify = False
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+    })
+    
+    result = {
+        "steps": [],
+        "final_data": {}
+    }
+    
+    # Step 1: Try dseX_share.php
+    try:
+        resp = session.get('https://dsebd.org/dseX_share.php', timeout=15, verify=False)
+        result["steps"].append({
+            "url": "dseX_share.php",
+            "status": resp.status_code,
+            "html_length": len(resp.text),
+            "has_shares_table": 'shares-table' in resp.text,
+            "has_tbody": '<tbody>' in resp.text,
+            "preview": resp.text[:500]
+        })
+        
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # Check tables
+            tables = soup.find_all('table', class_='shares-table')
+            result["steps"][-1]["shares_tables_found"] = len(tables)
+            
+            if tables:
+                for table in tables[:1]:  # First table
+                    rows = table.find_all('tr')
+                    result["steps"][-1]["total_rows"] = len(rows)
+                    
+                    sample_rows = []
+                    for i, row in enumerate(rows[:5]):  # First 5 rows
+                        cells = row.find_all(['td', 'th'])
+                        cell_texts = [c.get_text(strip=True)[:20] for c in cells]
+                        sample_rows.append({
+                            "row": i,
+                            "cells": len(cells),
+                            "texts": cell_texts
+                        })
+                    result["steps"][-1]["sample_rows"] = sample_rows
+            
+            # Try parsing
+            ltp_data = parse_dse_table(resp.text)
+            result["final_data"] = dict(list(ltp_data.items())[:5])
+            result["total_ltp"] = len(ltp_data)
+            
+    except Exception as e:
+        result["steps"].append({"url": "dseX_share.php", "error": str(e)})
+    
+    return result
+
 @app.get("/api/market-status")
 async def market_status():
     now = get_bd_time()
