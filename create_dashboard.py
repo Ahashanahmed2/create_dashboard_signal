@@ -51,7 +51,7 @@ def get_bd_time():
     return datetime.now(BD_TIMEZONE)
 
 # ================================
-# DSE WEBSITE MARKET STATUS - FIXED VERSION
+# DSE WEBSITE MARKET STATUS
 # ================================
 def is_dse_market_open():
     try:
@@ -113,7 +113,7 @@ async def market_status():
     }
 
 # ================================
-# LTP DATA - DSEX SHARE PAGE PRIMARY SOURCE
+# LTP DATA
 # ================================
 ltp_cache = {"data": {}, "timestamp": None}
 
@@ -122,7 +122,6 @@ async def get_dse_ltp(force: int = Query(None)):
     market_is_open = is_dse_market_open()
     force_refresh = force is not None
 
-    # ক্যাশ চেক
     if not force_refresh and ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
         if market_is_open:
@@ -298,7 +297,7 @@ async def get_dse_ltp(force: int = Query(None)):
     }
 
 # ================================
-# FIXED: ALL collections use analysis_date
+# MongoDB Query Helpers
 # ================================
 def build_date_query(date_value):
     return {'$or': [
@@ -759,7 +758,19 @@ async def dashboard():
 
         function switchTab(t) {
             document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-            event.target.classList.add('active');
+            const tabs = document.querySelectorAll('.tab');
+            const tabTexts = {
+                'ai_signals': 'AI Signals',
+                'swrsi': 'SWRSI', 
+                'support': 'S/R',
+                'ema': 'EMA 21',
+                'buy': 'Daily Buy'
+            };
+            tabs.forEach(tab => {
+                if (tab.textContent.includes(tabTexts[t])) {
+                    tab.classList.add('active');
+                }
+            });
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
             loadDates(COLLECTION_MAP[t]);
