@@ -12,6 +12,7 @@ create_dashboard.py
 ✅ LTP > High Breakout Row Highlight (GREEN)
 ✅ Default Sort: diff ASC, gape DESC
 ✅ LTP Data Available Even When Market Closed
+✅ LTP Parser Matches Exact DSE Table Structure (td index 2, class shares-table)
 """
 
 import os
@@ -323,6 +324,51 @@ async def market_status():
 # LTP Cache
 ltp_cache = {"data": {}, "timestamp": None}
 
+def parse_dse_table(html_text):
+    """
+    New parser matching the exact DSE table structure:
+    <table class="table table-bordered background-white shares-table">
+        <tbody>
+            <tr> (header) </tr>
+            <tr> data rows with td: #, TRADING CODE (<a>), LTP*, HIGH, LOW, CLOSEP*, YCP*, %CHANGE, TRADE, VALUE, VOLUME
+        </tbody>
+    </table>
+    LTP is in 3rd td (index 2), symbol is in 2nd td's <a> tag.
+    """
+    soup = BeautifulSoup(html_text, 'html.parser')
+    ltp_data = {}
+    # Find the specific table by class
+    tables = soup.find_all('table', class_='shares-table')
+    if not tables:
+        # fallback: any table
+        tables = soup.find_all('table')
+    for table in tables:
+        # skip header row (first tr) or check for th
+        rows = table.find_all('tr')[1:]  # assuming first row is header
+        for row in rows:
+            cells = row.find_all('td')
+            if len(cells) < 3:
+                continue
+            # Symbol extraction: second cell (index 1) contains <a>
+            symbol_cell = cells[1]
+            a_tag = symbol_cell.find('a')
+            if a_tag:
+                symbol = a_tag.text.strip()
+            else:
+                symbol = symbol_cell.get_text(strip=True)
+            if not symbol:
+                continue
+            # LTP extraction: third cell (index 2)
+            ltp_cell = cells[2]
+            ltp_text = ltp_cell.get_text(strip=True).replace(',', '')
+            try:
+                ltp = float(ltp_text)
+                if ltp > 0:
+                    ltp_data[symbol.upper()] = ltp
+            except:
+                continue
+    return ltp_data
+
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
     """DSE থেকে LTP ডাটা ফেচ করুন - মার্কেট বন্ধ থাকলেও ডাটা ফেচ করবে"""
@@ -341,211 +387,105 @@ async def get_dse_ltp():
             if age < 300 and ltp_cache["data"]:
                 return ltp_cache["data"]
 
-    ltp_data = {}
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
     })
 
-    # পদ্ধতি ১: DSE AJAX API - একাধিক পেজ থেকে ডাটা
+    ltp_data = {}
     data_fetched = False
-    
-    try:
-        for page in range(1, 6):  # 5 পেজ পর্যন্ত চেষ্টা
-            try:
-                response = session.get(
-                    f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}',
-                    headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
-                    timeout=10
-                )
 
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-
-                    tables = soup.find_all('table', {'class': 'table'})
-                    if not tables:
-                        tables = soup.find_all('table')
-
-                    page_has_data = False
-                    for table in tables:
-                        rows = table.find_all('tr')
-                        for row in rows:
-                            cols = row.find_all('td')
-                            if len(cols) >= 3:
-                                try:
-                                    # সিম্বল - বিভিন্ন লোকেশন থেকে ট্রাই
-                                    symbol = None
-                                    for col_idx in [1, 0, 2]:
-                                        if len(cols) > col_idx:
-                                            link = cols[col_idx].find('a')
-                                            if link:
-                                                symbol = link.text.strip()
-                                                break
-                                            else:
-                                                text = cols[col_idx].get_text(strip=True)
-                                                if text and len(text) >= 2 and text[0].isalpha():
-                                                    symbol = text
-                                                    break
-
-                                    # LTP - বিভিন্ন লোকেশন থেকে ট্রাই
-                                    ltp = None
-                                    for col_idx in [2, 3, 4, 5]:
-                                        if len(cols) > col_idx:
-                                            ltp_text = cols[col_idx].get_text(strip=True).replace(',', '')
-                                            try:
-                                                ltp = float(ltp_text)
-                                                if 0.1 < ltp < 50000:
-                                                    break
-                                            except:
-                                                continue
-
-                                    if symbol and ltp:
-                                        symbol = symbol.upper().strip()
-                                        ltp_data[symbol] = ltp
-                                        page_has_data = True
-                                        data_fetched = True
-                                except:
-                                    continue
-                    
-                    if not page_has_data:
-                        break  # এই পেজে ডাটা নেই, আর পেজ চেক করার দরকার নেই
-                        
-            except Exception as e:
-                print(f"[LTP] Page {page} failed: {e}")
-                break
-
-        if data_fetched:
-            status = "live" if market_is_open else "closed_with_data"
-            print(f"[LTP] ✅ Successfully fetched {len(ltp_data)} symbols (Market {'Open' if market_is_open else 'Closed'})")
-            result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api_multipage"}
-            ltp_cache["data"] = result
-            ltp_cache["timestamp"] = get_bd_time()
-            return result
-
-    except Exception as e:
-        print(f"[LTP] Method 1 failed: {e}")
-
-    # পদ্ধতি ২: LTP পেজ থেকে সরাসরি স্ক্র্যাপিং
-    try:
+    # Method 1: DSE AJAX API (latest_share_price_scroll_l.php) - multiple pages
+    for page in range(1, 6):
         try:
-            session.get('https://www.dsebd.org/', timeout=10)
-            time.sleep(1.5)
-        except:
-            pass
+            resp = session.get(
+                f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}',
+                headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                page_data = parse_dse_table(resp.text)
+                if page_data:
+                    ltp_data.update(page_data)
+                    data_fetched = True
+                else:
+                    # If no data found in this page, assume no more pages
+                    break
+        except Exception as e:
+            print(f"[LTP] Page {page} failed: {e}")
+            break
 
-        response = session.get(
-            'https://www.dsebd.org/latest_share_price_scroll_by_ltp.php',
-            timeout=15
-        )
+    if data_fetched:
+        status = "live" if market_is_open else "closed_with_data"
+        print(f"[LTP] ✅ Fetched {len(ltp_data)} symbols via AJAX API (Market {'Open' if market_is_open else 'Closed'})")
+        result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ajax_api"}
+        ltp_cache["data"] = result
+        ltp_cache["timestamp"] = get_bd_time()
+        return result
 
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+    # Method 2: LTP page (latest_share_price_scroll_by_ltp.php)
+    try:
+        # Sometimes need to hit homepage first
+        session.get('https://www.dsebd.org/', timeout=10)
+        time.sleep(1)
+        resp = session.get('https://www.dsebd.org/latest_share_price_scroll_by_ltp.php', timeout=15)
+        if resp.status_code == 200:
+            page_data = parse_dse_table(resp.text)
+            if page_data:
+                ltp_data.update(page_data)
+                data_fetched = True
+                status = "live" if market_is_open else "closed_with_data"
+                print(f"[LTP] ✅ Fetched {len(ltp_data)} symbols via LTP page (Market {'Open' if market_is_open else 'Closed'})")
+                result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "ltp_page"}
+                ltp_cache["data"] = result
+                ltp_cache["timestamp"] = get_bd_time()
+                return result
+    except Exception as e:
+        print(f"[LTP] Method 2 failed: {e}")
 
+    # Method 3: Mobile API (may work when closed)
+    try:
+        resp = session.get('https://www.dsebd.org/mobile.php', timeout=10)
+        if resp.status_code == 200:
+            # Parse mobile table (likely similar structure but simpler)
+            soup = BeautifulSoup(resp.text, 'html.parser')
             for table in soup.find_all('table'):
                 rows = table.find_all('tr')
                 for row in rows:
                     cols = row.find_all('td')
-                    if len(cols) >= 3:
+                    if len(cols) >= 2:
                         try:
-                            symbol = None
-                            # বিভিন্ন কলাম থেকে সিম্বল খুঁজুন
-                            for col_idx in [1, 0]:
-                                if len(cols) > col_idx:
-                                    link = cols[col_idx].find('a')
-                                    if link:
-                                        symbol = link.text.strip()
-                                        break
-                                    else:
-                                        text = cols[col_idx].get_text(strip=True)
-                                        if text and len(text) >= 2 and text[0].isalpha():
-                                            symbol = text
-                                            break
-
-                            # বিভিন্ন কলাম থেকে LTP খুঁজুন
-                            ltp = None
-                            for col_idx in [5, 4, 3, 2]:
-                                if len(cols) > col_idx:
-                                    ltp_text = cols[col_idx].get_text(strip=True).replace(',', '')
-                                    try:
-                                        ltp = float(ltp_text)
-                                        if 0.1 < ltp < 50000:
-                                            break
-                                    except:
-                                        continue
-
-                            if symbol and ltp:
+                            symbol = cols[0].get_text(strip=True)
+                            ltp_txt = cols[1].get_text(strip=True).replace(',', '')
+                            ltp = float(ltp_txt)
+                            if ltp > 0:
                                 ltp_data[symbol.upper()] = ltp
                                 data_fetched = True
                         except:
                             continue
-
-        if data_fetched:
-            status = "live" if market_is_open else "closed_with_data"
-            print(f"[LTP] ✅ Method 2: Fetched {len(ltp_data)} symbols (Market {'Open' if market_is_open else 'Closed'})")
-            result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "html_table"}
-            ltp_cache["data"] = result
-            ltp_cache["timestamp"] = get_bd_time()
-            return result
-
+            if data_fetched:
+                status = "live" if market_is_open else "closed_with_data"
+                print(f"[LTP] ✅ Fetched {len(ltp_data)} symbols via Mobile API")
+                result = {"status": status, "total_symbols": len(ltp_data), "ltp_data": ltp_data, "source": "mobile_api"}
+                ltp_cache["data"] = result
+                ltp_cache["timestamp"] = get_bd_time()
+                return result
     except Exception as e:
-        print(f"[LTP] Method 2 failed: {e}")
+        print(f"[LTP] Method 3 failed: {e}")
 
-    # পদ্ধতি ৩: DSE মোবাইল API (মার্কেট বন্ধ থাকলেও কাজ করতে পারে)
-    if not data_fetched:
-        try:
-            mobile_response = session.get(
-                'https://www.dsebd.org/mobile.php',
-                timeout=10
-            )
-            
-            if mobile_response.status_code == 200:
-                soup = BeautifulSoup(mobile_response.text, 'html.parser')
-                
-                for table in soup.find_all('table'):
-                    rows = table.find_all('tr')
-                    for row in rows:
-                        cols = row.find_all('td')
-                        if len(cols) >= 2:
-                            try:
-                                symbol = cols[0].get_text(strip=True)
-                                ltp_text = cols[1].get_text(strip=True).replace(',', '')
-                                ltp = float(ltp_text)
-                                if symbol and ltp and 0.1 < ltp < 50000:
-                                    ltp_data[symbol.upper()] = ltp
-                                    data_fetched = True
-                            except:
-                                continue
-                
-                if data_fetched:
-                    print(f"[LTP] ✅ Method 3 (Mobile API): Fetched {len(ltp_data)} symbols")
-                    result = {
-                        "status": "closed_with_data" if not market_is_open else "live",
-                        "total_symbols": len(ltp_data),
-                        "ltp_data": ltp_data,
-                        "source": "mobile_api"
-                    }
-                    ltp_cache["data"] = result
-                    ltp_cache["timestamp"] = get_bd_time()
-                    return result
-                    
-        except Exception as e:
-            print(f"[LTP] Method 3 failed: {e}")
-
-    # কোনো ডাটা পাওয়া যায়নি - ক্যাশ চেক
-    if not data_fetched and ltp_cache["data"]:
-        print(f"[LTP] ⚠️ No fresh data. Using cached data from {ltp_cache['timestamp']}")
+    # Fallback to cache if exists
+    if ltp_cache["data"]:
+        print(f"[LTP] ⚠️ Using cached data from {ltp_cache['timestamp']}")
         cached_result = ltp_cache["data"].copy()
         cached_result["status"] = "cached"
         cached_result["source"] = "cache_fallback"
         return cached_result
 
-    # একদমই কোনো ডাটা নেই
-    print(f"[LTP] ❌ Failed to fetch any data. Market status: {'Open' if market_is_open else 'Closed'}")
+    print(f"[LTP] ❌ No data available. Market status: {'Open' if market_is_open else 'Closed'}")
     return {
         "status": "error",
         "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি",
