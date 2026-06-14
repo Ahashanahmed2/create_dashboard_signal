@@ -325,7 +325,7 @@ async def market_status():
 ltp_cache = {"data": {}, "timestamp": None}
 
 @app.get("/api/dse-ltp")
-async def get_dse_ltp(force: int = Query(None)):
+async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
     """DSE থেকে LTP ডাটা ফেচ করুন - মার্কেট বন্ধ থাকলেও ডাটা ফেচ করবে"""
 
     market_is_open = is_dse_market_open()
@@ -345,6 +345,8 @@ async def get_dse_ltp(force: int = Query(None)):
                 print(f"[LTP] Using cache ({age:.0f}s old) - market closed")
                 return ltp_cache["data"]
 
+    print(f"[LTP] Fetching fresh data... (force={force_refresh})")
+
     ltp_data = {}
     session = requests.Session()
     session.headers.update({
@@ -363,7 +365,7 @@ async def get_dse_ltp(force: int = Query(None)):
         for page in range(1, 6):  # 5 পেজ পর্যন্ত চেষ্টা
             try:
                 response = session.get(
-                    f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}&_={int(time.time())}',
+                    f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}&_={int(time.time()*1000)}',
                     headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
                     timeout=10
                 )
@@ -1013,6 +1015,8 @@ async def dashboard():
         // LTP update timer
         let ltpUpdateInterval = null;
         let isMarketOpen = false;
+        let isFetchingLtp = false;
+        let lastLtpFetchTime = 0;
         
         // Sorting state
         let currentSort = { field: null, order: null };
@@ -1031,6 +1035,8 @@ async def dashboard():
         checkMarketStatus();
         loadDseLtp(true);
         loadAlertRules();
+        
+        // Market status check every 60 seconds
         setInterval(checkMarketStatus, 60000);
         
         // Start LTP update interval (30 seconds)
@@ -1120,26 +1126,52 @@ async def dashboard():
         }
 
         async function loadDseLtp(forceRefresh = false) {
+            if (isFetchingLtp) {
+                console.log('LTP: Already fetching, skipping...');
+                return;
+            }
+            
+            const now = Date.now();
+            if (!forceRefresh && (now - lastLtpFetchTime) < 5000 && Object.keys(dseLtpData).length > 0) {
+                console.log('LTP: Using cached data (', Math.round((now - lastLtpFetchTime)/1000), 's old)');
+                return;
+            }
+            
+            isFetchingLtp = true;
+            
             try { 
-                let url = '/api/dse-ltp';
+                const timestamp = Date.now();
+                let url = `/api/dse-ltp?_=${timestamp}`;
                 if (forceRefresh) {
-                    url += '?force=1&_=' + Date.now();
-                } else {
-                    url += '?_=' + Date.now();
+                    url += `&force=1`;
                 }
+                
+                console.log('LTP: Fetching from', url);
+                
                 const r = await fetch(url, {
+                    cache: 'no-store',
                     headers: {
-                        'Cache-Control': 'no-cache'
+                        'Cache-Control': 'no-cache, no-store, must-revalidate',
+                        'Pragma': 'no-cache',
+                        'Expires': '0'
                     }
                 }); 
                 const j = await r.json();
-                console.log('LTP:', j.status, '| Symbols:', j.ltp_data ? Object.keys(j.ltp_data).length : 0, '| Source:', j.source);
+                
+                console.log('LTP Response:', j.status, '| Symbols:', j.ltp_data ? Object.keys(j.ltp_data).length : 0, '| Source:', j.source);
+                
                 if (j.ltp_data && Object.keys(j.ltp_data).length > 0) {
                     dseLtpData = j.ltp_data;
+                    lastLtpFetchTime = Date.now();
+                    console.log('✅ LTP Updated:', Object.keys(dseLtpData).length, 'symbols');
                     renderCurrentTab();
+                } else {
+                    console.warn('⚠️ No LTP data received');
                 }
             } catch(e) {
-                console.error('LTP fetch error:', e.message);
+                console.error('❌ LTP fetch error:', e.message);
+            } finally {
+                isFetchingLtp = false;
             }
         }
 
@@ -1498,7 +1530,7 @@ async def dashboard():
             loadCurrentTab();
         }
 
-        // ==================== FIXED: renderAITable() ====================
+        // ==================== renderAITable() ====================
         function renderAITable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
@@ -1523,7 +1555,7 @@ async def dashboard():
                 <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
                 <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            </tr></thead><tbody>`;
+            </table></thead><tbody>`;
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
@@ -1563,53 +1595,53 @@ async def dashboard():
                     <td>${i+1}</td>
                     <td><strong>${r.symbol || ''}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
                     <td>${r.analysis_date || ''}</td>
-                    <td>${(r.current_price || 0).toFixed(2)}</td>
-                    <td>${ltpDisplay}</td>
+                    <td style="text-align:right;">${(r.current_price || 0).toFixed(2)}</td>
+                    <td style="text-align:right;">${ltpDisplay}</td>
                     <td>${r.sector || ''}</td>
-                    <td class="${getSignalClass(r.final_signal)}" style="background:#1a1a2e;">${r.final_signal || ''}</td>
-                    <td><strong>${(r.final_combined_score || 0).toFixed(1)}</strong></td>
+                    <td class="${getSignalClass(r.final_signal)}" style="background:#1a1a2e;text-align:center;">${r.final_signal || ''}</td>
+                    <td style="text-align:center;"><strong>${(r.final_combined_score || 0).toFixed(1)}</strong></td>
                     <td>${r.llm_signal || ''}</td>
-                    <td style="background:#1a1a2e;">${(r.llm_confidence || 0).toFixed(0)}%</td>
+                    <td style="background:#1a1a2e;text-align:right;">${(r.llm_confidence || 0).toFixed(0)}%</td>
                     <td>${r.llm_strength || ''}</td>
-                    <td style="background:#1a1a2e;">${r.llm_bias || ''}</td>
-                    <td>${r.llm_available ? '✅' : '❌'}</td>
-                    <td>${r.xgb_signal || ''}</td>
-                    <td style="background:#1a1a2e;">${(r.xgb_confidence || 0).toFixed(0)}%</td>
-                    <td>${(r.xgb_prob_up || 0).toFixed(3)}</td>
-                    <td style="background:#1a1a2e;">${(r.xgb_auc || 0).toFixed(3)}</td>
-                    <td>${r.xgb_available ? '✅' : '❌'}</td>
+                    <td style="background:#1a1a2e;text-align:center;">${r.llm_bias || ''}</td>
+                    <td style="text-align:center;">${r.llm_available ? '✅' : '❌'}</td>
+                    <td>${r.xgb_signal || ''}<td>
+                    <td style="background:#1a1a2e;text-align:right;">${(r.xgb_confidence || 0).toFixed(0)}%</td>
+                    <td style="text-align:right;">${(r.xgb_prob_up || 0).toFixed(3)}</td>
+                    <td style="background:#1a1a2e;text-align:right;">${(r.xgb_auc || 0).toFixed(3)}</td>
+                    <td style="text-align:center;">${r.xgb_available ? '✅' : '❌'}</td>
                     <td>${r.ppo_signal || ''}</td>
-                    <td style="background:#1a1a2e;">${(r.ppo_confidence || 0).toFixed(0)}%</td>
-                    <td>${r.ppo_available ? '✅' : '❌'}</td>
-                    <td style="background:#1a1a2e;">${r.ppo_weight || 0}</td>
-                    <td>${(r.agentic_score || 0).toFixed(1)}</td>
-                    <td style="background:#1a1a2e;">${r.agentic_bias || ''}</td>
-                    <td>${r.agentic_available ? '✅' : '❌'}</td>
-                    <td>${(r.elliott_accuracy || 0).toFixed(1)}%</td>
-                    <td style="background:#1a1a2e;">${r.elliott_total_predictions || 0}</td>
-                    <td style="font-size:0.65em;background:#1a1a2e;">${(r.elliott_wave_count || '').substring(0,15)}</td>
-                    <td style="font-size:0.65em;max-width:100px;overflow:hidden;background:#1a1a2e;">${(r.elliott_sub_waves || '').substring(0,20)}</td>
+                    <td style="background:#1a1a2e;text-align:right;">${(r.ppo_confidence || 0).toFixed(0)}%</td>
+                    <td style="text-align:center;">${r.ppo_available ? '✅' : '❌'}</td>
+                    <td style="background:#1a1a2e;text-align:center;">${r.ppo_weight || 0}</td>
+                    <td style="text-align:center;">${(r.agentic_score || 0).toFixed(1)}</td>
+                    <td style="background:#1a1a2e;text-align:center;">${r.agentic_bias || ''}</td>
+                    <td style="text-align:center;">${r.agentic_available ? '✅' : '❌'}</td>
+                    <td style="text-align:right;">${(r.elliott_accuracy || 0).toFixed(1)}%</td>
+                    <td style="background:#1a1a2e;text-align:center;">${r.elliott_total_predictions || 0}</td>
+                    <td style="font-size:0.65em;background:#1a1a2e;text-align:center;">${(r.elliott_wave_count || '').substring(0,15)}</td>
+                    <td style="font-size:0.65em;max-width:100px;overflow:hidden;background:#1a1a2e;text-align:center;">${(r.elliott_sub_waves || '').substring(0,20)}</td>
                     <td>${r.elliott_current_wave || ''}</td>
-                    <td style="background:#1a1a2e;">${(r.elliott_wave_confidence || 0).toFixed(0)}%</td>
-                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td>
-                    <td style="background:#1a1a2e;">${r.elliott_wave_position || ''}</td>
-                    <td style="color:#ffd700;font-weight:bold;background:#1a1a2e;">${diffVal}</td>
-                    <td style="color:#00d4ff;font-weight:bold;background:#1a1a2e;">${gapeVal}</td>
-                    <td>${entryCell}</td>
-                    <td style="background:#1a1a2e;">${slCell}</td>
-                    <td>${tpCell}</td>
-                    <td class="${rrrClass}" style="background:#1a1a2e;"><strong>${rrr.toFixed(2)}</strong></td>
-                    <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
-                    <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
-                    <td>${actionCell}</td>
+                    <td style="background:#1a1a2e;text-align:right;">${(r.elliott_wave_confidence || 0).toFixed(0)}%</td>
+                    <td style="text-align:center;">${r.elliott_is_bullish ? '✅' : '❌'}</td>
+                    <td style="background:#1a1a2e;text-align:center;">${r.elliott_wave_position || ''}</td>
+                    <td style="color:#ffd700;font-weight:bold;background:#1a1a2e;text-align:right;">${diffVal}</td>
+                    <td style="color:#00d4ff;font-weight:bold;background:#1a1a2e;text-align:right;">${gapeVal}</td>
+                    <td style="text-align:right;">${entryCell}</td>
+                    <td style="background:#1a1a2e;text-align:right;">${slCell}</td>
+                    <td style="text-align:right;">${tpCell}</td>
+                    <td class="${rrrClass}" style="background:#1a1a2e;text-align:center;"><strong>${rrr.toFixed(2)}</strong></td>
+                    <td style="text-align:right;">${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
+                    <td style="text-align:center;">${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
+                    <td style="text-align:center;">${actionCell}</td>
                 </tr>`;
             }
-            html += '</tbody><tr>';
+            html += '</tbody></table>';
             div.innerHTML = html;
             document.getElementById('recordCount').textContent = `(${currentData.length} signals)`;
         }
 
-        // ==================== FIXED: renderSWRSITable() ====================
+        // ==================== renderSWRSITable() ====================
         function renderSWRSITable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
@@ -1655,39 +1687,39 @@ async def dashboard():
                     <td>${i+1}</td>
                     <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
                     <td>${r.sector || ''}</td>
-                    <td>${ltpDisplay}</td>
-                    <td>${(r.composite_score || 0).toFixed(0)}</td>
+                    <td style="text-align:right;">${ltpDisplay}</td>
+                    <td style="text-align:center;">${(r.composite_score || 0).toFixed(0)}</td>
                     <td>${r.weekly_divergence || ''}</td>
-                    <td style="background:#1a1a2e;">${r.weekly_strength_label || ''}</td>
-                    <td>${r.weekly_strength_score || 0}</td>
-                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td>
-                    <td style="background:#1a1a2e;">${(r.weekly_curr_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td>
-                    <td style="background:#1a1a2e;">${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td>
-                    <td style="background:#1a1a2e;">+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
+                    <td style="background:#1a1a2e;text-align:center;">${r.weekly_strength_label || ''}</td>
+                    <td style="text-align:center;">${r.weekly_strength_score || 0}</td>
+                    <td style="text-align:right;">${(r.weekly_prev_low || 0).toFixed(2)}</td>
+                    <td style="background:#1a1a2e;text-align:right;">${(r.weekly_curr_low || 0).toFixed(2)}</td>
+                    <td style="text-align:right;">${(r.weekly_prev_rsi || 0).toFixed(2)}</td>
+                    <td style="background:#1a1a2e;text-align:right;">${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
+                    <td style="text-align:right;">${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td>
+                    <td style="background:#1a1a2e;text-align:right;">+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
                     <td>${r.weekly_prev_date || ''}</td>
                     <td style="background:#1a1a2e;">${r.weekly_curr_date || ''}</td>
                     <td>${r.daily_divergence_type || ''}</td>
                     <td style="background:#1a1a2e;">${r.daily_divergence_strength || ''}</td>
-                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td>
-                    <td style="background:#1a1a2e;">${(r.daily_prev_rsi || 0).toFixed(2)}</td>
-                    <td style="color:#ffd700;font-weight:bold;">${r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-'}</td>
-                    <td style="color:#00d4ff;font-weight:bold;">${r.gape !== undefined ? r.gape.toFixed(2) : '-'}</td>
-                    <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
-                    <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
-                    <td>${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
-                    <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
-                    <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
-                    <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
-                    <td><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${recordDate}','swrsi')">🗑️</button></td>
+                    <td style="text-align:right;">${(r.daily_last_rsi || 0).toFixed(2)}</td>
+                    <td style="background:#1a1a2e;text-align:right;">${(r.daily_prev_rsi || 0).toFixed(2)}</td>
+                    <td style="color:#ffd700;font-weight:bold;text-align:right;">${r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-'}</td>
+                    <td style="color:#00d4ff;font-weight:bold;text-align:right;">${r.gape !== undefined ? r.gape.toFixed(2) : '-'}</td>
+                    <td style="text-align:right;">${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
+                    <td style="text-align:right;">${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
+                    <td style="text-align:right;">${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
+                    <td class="${rrrClass}" style="text-align:center;"><strong>${rrr.toFixed(2)}</strong></td>
+                    <td style="text-align:right;">${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
+                    <td style="text-align:center;">${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
+                    <td style="text-align:center;"><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${recordDate}','swrsi')">🗑️</button></td>
                 </tr>`;
             }
             html += '</tbody></table>';
             div.innerHTML = html;
         }
 
-        // ==================== FIXED: renderGenericTable() ====================
+        // ==================== renderGenericTable() ====================
         function renderGenericTable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
@@ -1698,7 +1730,7 @@ async def dashboard():
             const otherKeys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_') && !orderedKeys.includes(k) && k !== 'symbol');
             const keys = [...orderedKeys, ...otherKeys];
             
-            let html = `</table><thead><tr>
+            let html = `<table><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
                 <th>LTP</th>`;
@@ -1738,35 +1770,35 @@ async def dashboard():
                 html += `<tr class="${rowClass}">
                     <td>${i+1}</td>
                     <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
-                    <td>${ltpDisplay}</td>`;
+                    <td style="text-align:right;">${ltpDisplay}</td>`;
                 
                 for (let k of keys) {
                     let val = r[k];
                     if (val === undefined || val === null) val = '';
                     if (k === 'gape' && val !== '') {
-                        html += `<td style="color:#00d4ff;font-weight:bold;">${Number(val).toFixed(2)}</td>`;
+                        html += `<td style="color:#00d4ff;font-weight:bold;text-align:right;">${Number(val).toFixed(2)}</td>`;
                     } else if (k === 'diff' && val !== '') {
-                        html += `<td style="color:#ffd700;font-weight:bold;">${val > 0 ? '+' : ''}${Number(val).toFixed(2)}</td>`;
+                        html += `<td style="color:#ffd700;font-weight:bold;text-align:right;">${val > 0 ? '+' : ''}${Number(val).toFixed(2)}</td>`;
                     } else if (typeof val === 'number') {
                         if (k === 'rt') {
-                            html += `<td style="background:#1a1a2e;">${val.toFixed(2)}%</td>`;
+                            html += `<td style="background:#1a1a2e;text-align:right;">${val.toFixed(2)}%</td>`;
                         } else if (k === 'high' || k === 'low' || k === 'close' || k === 'current_price') {
-                            html += `<td style="background:#1a1a2e;">${val.toFixed(2)}</td>`;
+                            html += `<td style="background:#1a1a2e;text-align:right;">${val.toFixed(2)}</td>`;
                         } else {
-                            html += `<td style="background:#1a1a2e;">${val.toFixed(2)}</td>`;
+                            html += `<td style="background:#1a1a2e;text-align:right;">${val.toFixed(2)}</td>`;
                         }
                     } else {
                         html += `<td style="background:#1a1a2e;">${val}</td>`;
                     }
                 }
                 
-                html += `<td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
-                    <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
-                    <td>${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
-                    <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
-                    <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
-                    <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
-                    <td><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${recordDate}','${currentTab}')">🗑️</button></td>
+                html += `<td style="text-align:right;">${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
+                    <td style="text-align:right;">${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
+                    <td style="text-align:right;">${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
+                    <td class="${rrrClass}" style="text-align:center;"><strong>${rrr.toFixed(2)}</strong></td>
+                    <td style="text-align:right;">${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
+                    <td style="text-align:center;">${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
+                    <td style="text-align:center;"><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${recordDate}','${currentTab}')">🗑️</button></td>
                 </tr>`;
             }
             html += '</tbody></table>';
