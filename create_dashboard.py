@@ -148,17 +148,17 @@ async def get_dse_ltp(force: int = Query(None)):
     try:
         print("[LTP] Trying DSEX Share page...")
         response = session.get('https://www.dsebd.org/dseX_share.php', timeout=15)
-        
+
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             table = soup.find('table', class_='shares-table')
             if not table:
                 table = soup.find('table', class_='table-bordered')
-            
+
             if table:
                 rows = table.find_all('tr')
                 print(f"[LTP] DSEX page: Found {len(rows)} rows")
-                
+
                 for row in rows:
                     cols = row.find_all('td')
                     if len(cols) >= 3:
@@ -167,7 +167,7 @@ async def get_dse_ltp(force: int = Query(None)):
                             a_tag = cols[1].find('a')
                             if a_tag:
                                 symbol = a_tag.text.strip()
-                            
+
                             if symbol and len(symbol) >= 2:
                                 ltp_text = cols[2].get_text(strip=True).replace(',', '')
                                 ltp = float(ltp_text)
@@ -176,7 +176,7 @@ async def get_dse_ltp(force: int = Query(None)):
                                     data_fetched = True
                         except:
                             continue
-                
+
                 if data_fetched:
                     print(f"[LTP] ✅ DSEX Page: {len(ltp_data)} symbols")
                     result = {
@@ -188,7 +188,7 @@ async def get_dse_ltp(force: int = Query(None)):
                     ltp_cache["data"] = result
                     ltp_cache["timestamp"] = get_bd_time()
                     return result
-                    
+
     except Exception as e:
         print(f"[LTP] DSEX method failed: {e}")
 
@@ -201,7 +201,7 @@ async def get_dse_ltp(force: int = Query(None)):
                 headers={'X-Requested-With': 'XMLHttpRequest'},
                 timeout=10
             )
-            
+
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 for table in soup.find_all('table'):
@@ -218,7 +218,7 @@ async def get_dse_ltp(force: int = Query(None)):
                                     text = cols[1].get_text(strip=True)
                                     if text and len(text) >= 2:
                                         symbol = text
-                                
+
                                 if symbol:
                                     ltp_text = cols[2].get_text(strip=True).replace(',', '')
                                     ltp = float(ltp_text)
@@ -227,7 +227,7 @@ async def get_dse_ltp(force: int = Query(None)):
                                         data_fetched = True
                             except:
                                 continue
-                
+
                 if data_fetched:
                     print(f"[LTP] ✅ AJAX: {len(ltp_data)} symbols")
                     result = {
@@ -239,7 +239,7 @@ async def get_dse_ltp(force: int = Query(None)):
                     ltp_cache["data"] = result
                     ltp_cache["timestamp"] = get_bd_time()
                     return result
-                    
+
         except Exception as e:
             print(f"[LTP] AJAX failed: {e}")
 
@@ -248,7 +248,7 @@ async def get_dse_ltp(force: int = Query(None)):
         try:
             print("[LTP] Trying mobile API...")
             response = session.get('https://www.dsebd.org/mobile.php', timeout=10)
-            
+
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 for table in soup.find_all('table'):
@@ -265,7 +265,7 @@ async def get_dse_ltp(force: int = Query(None)):
                                     data_fetched = True
                             except:
                                 continue
-                
+
                 if data_fetched:
                     print(f"[LTP] ✅ Mobile: {len(ltp_data)} symbols")
                     result = {
@@ -277,7 +277,7 @@ async def get_dse_ltp(force: int = Query(None)):
                     ltp_cache["data"] = result
                     ltp_cache["timestamp"] = get_bd_time()
                     return result
-                    
+
         except Exception as e:
             print(f"[LTP] Mobile failed: {e}")
 
@@ -1021,7 +1021,7 @@ async def dashboard():
                 html += '<td>' + ((r.ppo_confidence||0).toFixed(0)) + '%</td>';
                 html += '<td>' + ((r.agentic_score||0).toFixed(1)) + '</td>';
                 html += '<td>' + (r.diff!==undefined?(r.diff>0?'+':'')+r.diff.toFixed(2):'-') + '</td>';
-                html += '<td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '</td>';
+                html += '<td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '<td>';
                 html += '<td>' + entryCell + '</td>';
                 html += '<td>' + slCell + '</td>';
                 html += '<td>' + tpCell + '</td>';
@@ -1076,7 +1076,7 @@ async def dashboard():
             
             const keys = Object.keys(currentData[0]).filter(k => !['_id', 'saved_at', 'analysis_date', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at'].includes(k));
             
-            let html = '<table><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>' + keys.map(k => '<th>' + k + '</th>').join('') + '<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
+            let html = '<tr><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>' + keys.map(k => '<th>' + k + '</th>').join('') + '<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
@@ -1098,7 +1098,7 @@ async def dashboard():
                     if (typeof val === 'number') val = val.toFixed(2);
                     html += '<td>' + val + '</td>';
                 }
-                html += '<td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '</td>';
+                html += '<td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '<tr>';
                 html += '<td>' + (r.stop_loss?r.stop_loss.toFixed(2):'-') + '</td>';
                 html += '<td>' + (r.target_price?r.target_price.toFixed(2):'-') + '</td>';
                 html += '<td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td>';
