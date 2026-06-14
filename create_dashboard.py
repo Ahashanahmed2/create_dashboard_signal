@@ -58,59 +58,18 @@ def is_dse_market_open():
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache'
         })
-
         try:
             response = session.get('https://www.dsebd.org/', timeout=10)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
-                all_text_elements = soup.find_all(string=True)
-                full_page_text = ' '.join([text.strip() for text in all_text_elements if text.strip()])
-                if re.search(r'Market\s+Status\s*:\s*Open', full_page_text, re.IGNORECASE):
-                    return True
-                if re.search(r'Market\s+Status\s*:\s*Closed', full_page_text, re.IGNORECASE):
+                text = soup.get_text()
+                if 'Market Closed' in text or 'CLOSED' in text.upper():
                     return False
+                if 'Market Open' in text or 'OPEN' in text.upper():
+                    return True
         except:
             pass
-
-        try:
-            ajax_response = session.get(
-                'https://www.dsebd.org/latest_share_price_scroll_l.php',
-                headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
-                timeout=15
-            )
-            if ajax_response.status_code == 200:
-                soup = BeautifulSoup(ajax_response.text, 'html.parser')
-                tables = soup.find_all('table')
-                for table in tables:
-                    rows = table.find_all('tr')
-                    data_rows = []
-                    for row in rows:
-                        tds = row.find_all('td')
-                        if tds and len(tds) >= 3:
-                            try:
-                                symbol_text = tds[1].get_text(strip=True) if len(tds) > 1 else ''
-                                ltp_text = tds[2].get_text(strip=True).replace(',', '') if len(tds) > 2 else ''
-                                if symbol_text and ltp_text:
-                                    ltp_value = float(ltp_text)
-                                    if ltp_value > 0:
-                                        data_rows.append(row)
-                            except:
-                                continue
-                    if len(data_rows) > 10:
-                        return True
-                    elif len(data_rows) > 0:
-                        return True
-                return False
-        except:
-            pass
-
         return _is_dse_market_open_by_time()
     except:
         return _is_dse_market_open_by_time()
@@ -126,8 +85,6 @@ def _is_dse_market_open_by_time():
         market_close_time = 14 * 60 + 20
         if market_open_time <= current_time <= market_close_time:
             return True
-        else:
-            return False
     return False
 
 # ================================
@@ -135,7 +92,7 @@ def _is_dse_market_open_by_time():
 # ================================
 @app.api_route("/head", methods=["GET", "HEAD"])
 async def uptime_robot_head():
-    return Response(content="OK", status_code=200, headers={"Cache-Control": "no-cache", "X-Health-Status": "healthy"})
+    return Response(content="OK", status_code=200)
 
 @app.get('/sw.js')
 async def service_worker():
@@ -144,158 +101,142 @@ async def service_worker():
 @app.get("/api/health")
 async def health():
     col = get_mongo_collection()
-    swrsi_col = get_mongo_collection("swrsi_signals") if MONGODB_URI else None
-    swrsi_count = swrsi_col.count_documents({}) if swrsi_col else 0
-    return {
-        "status": "ok", 
-        "mongodb": "connected" if col else "not configured",
-        "swrsi_signals": swrsi_count,
-        "dse_market": "OPEN" if is_dse_market_open() else "CLOSED",
-        "bangladesh_time": get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
-    }
+    return {"status": "ok", "mongodb": "connected" if col else "not configured"}
 
 @app.get("/api/market-status")
 async def market_status():
     now = get_bd_time()
     is_open = is_dse_market_open()
-    close_time = now.replace(hour=14, minute=20, second=0, microsecond=0)
-    time_to_close = (close_time - now).total_seconds()
-    alert_10min = is_open and (0 < time_to_close <= 600)
-    if not is_open:
-        weekday = now.weekday()
-        if weekday == 4:
-            next_open = "Sunday 10:00 AM"
-        elif weekday == 5:
-            next_open = "Sunday 10:00 AM"
-        elif weekday in [0, 1, 2, 3]:
-            next_open = "Tomorrow 10:00 AM"
-        else:
-            next_open = "Tomorrow 10:00 AM"
-    else:
-        next_open = None
     return {
         "is_open": is_open,
-        "alert_10min": alert_10min,
-        "alert_message": "⚠️ DSE CLOSING IN 10 MINUTES!" if alert_10min else "",
-        "next_open": next_open,
-        "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S'),
-        "source": "dse_website"
+        "bangladesh_time": now.strftime('%Y-%m-%d %H:%M:%S')
     }
 
-# LTP Cache
-ltp_cache = {"data": {}, "timestamp": None, "last_valid_data": {}}
+# ================================
+# LTP DATA - ONLY FROM DSE (NO SAMPLE DATA)
+# ================================
+ltp_cache = {"data": {}, "timestamp": None}
 
 @app.get("/api/dse-ltp")
-async def get_dse_ltp(force: int = Query(None), _: int = Query(None)):
+async def get_dse_ltp(force: int = Query(None)):
     market_is_open = is_dse_market_open()
-    force_refresh = force is not None
-
-    if not force_refresh and ltp_cache["timestamp"]:
+    
+    # Check cache
+    if not force and ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
-        if market_is_open:
-            if age < 30 and ltp_cache["data"]:
-                return ltp_cache["data"]
-        else:
-            if ltp_cache["data"]:
-                result = ltp_cache["data"].copy()
-                result["status"] = "market_closed_cached"
-                return result
-
+        if age < 60:
+            print(f"[LTP] Using cache ({age:.0f}s old)")
+            return ltp_cache["data"]
+    
     ltp_data = {}
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
         'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
     })
-
-    data_fetched = False
-    all_pages_data = {}
-
+    
+    # Method 1: DSE LTP API (AJAX)
     try:
-        for page in range(1, 4):
-            try:
-                response = session.get(
-                    f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}&_={int(time.time()*1000)}',
-                    headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
-                    timeout=15
-                )
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    tables = soup.find_all('table')
-                    page_has_data = False
-                    for table in tables:
-                        rows = table.find_all('tr')
-                        for row in rows:
-                            cols = row.find_all('td')
-                            if len(cols) >= 3:
-                                try:
-                                    symbol = None
-                                    for col_idx in [1, 0]:
-                                        if len(cols) > col_idx:
-                                            link = cols[col_idx].find('a')
-                                            if link:
-                                                symbol = link.text.strip()
-                                                break
-                                            else:
-                                                text = cols[col_idx].get_text(strip=True)
-                                                if text and len(text) >= 2 and text[0].isalpha():
-                                                    symbol = text
-                                                    break
-                                    ltp = None
-                                    for col_idx in [2, 3, 4]:
-                                        if len(cols) > col_idx:
-                                            ltp_text = cols[col_idx].get_text(strip=True).replace(',', '')
-                                            try:
-                                                ltp = float(ltp_text)
-                                                if 0.1 < ltp < 50000:
-                                                    break
-                                            except:
-                                                continue
-                                    if symbol and ltp:
-                                        symbol = symbol.upper().strip()
-                                        all_pages_data[symbol] = ltp
-                                        page_has_data = True
-                                        data_fetched = True
-                                except:
-                                    continue
-                    if not page_has_data:
-                        break
-            except Exception as e:
-                break
-        if data_fetched:
-            ltp_data = all_pages_data
-            result = {
-                "status": "live" if market_is_open else "closed_with_data", 
-                "total_symbols": len(ltp_data), 
-                "ltp_data": ltp_data, 
-                "source": "dse_live"
-            }
-            ltp_cache["data"] = result
-            ltp_cache["timestamp"] = get_bd_time()
-            ltp_cache["last_valid_data"] = ltp_data.copy()
-            return result
+        response = session.get(
+            'https://www.dsebd.org/latest_share_price_scroll_l.php',
+            headers={'X-Requested-With': 'XMLHttpRequest'},
+            timeout=15
+        )
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for row in soup.find_all('tr'):
+                cols = row.find_all('td')
+                if len(cols) >= 3:
+                    try:
+                        symbol = None
+                        for link in cols[1].find_all('a'):
+                            symbol = link.text.strip()
+                            break
+                        if not symbol:
+                            symbol = cols[1].get_text(strip=True)
+                        
+                        ltp_text = cols[2].get_text(strip=True).replace(',', '')
+                        ltp = float(ltp_text)
+                        if symbol and ltp and 0.1 < ltp < 50000:
+                            ltp_data[symbol.upper()] = ltp
+                    except:
+                        continue
+            if ltp_data:
+                print(f"[LTP] Method 1: Got {len(ltp_data)} symbols")
     except Exception as e:
-        pass
-
-    if ltp_cache["last_valid_data"]:
+        print(f"[LTP] Method 1 failed: {e}")
+    
+    # Method 2: Alternative LTP page
+    if not ltp_data:
+        try:
+            response = session.get(
+                'https://www.dsebd.org/latest_share_price_scroll_by_ltp.php',
+                timeout=15
+            )
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                for row in soup.find_all('tr'):
+                    cols = row.find_all('td')
+                    if len(cols) >= 3:
+                        try:
+                            symbol = cols[1].get_text(strip=True)
+                            ltp_text = cols[5].get_text(strip=True).replace(',', '')
+                            ltp = float(ltp_text)
+                            if symbol and ltp:
+                                ltp_data[symbol.upper()] = ltp
+                        except:
+                            continue
+                if ltp_data:
+                    print(f"[LTP] Method 2: Got {len(ltp_data)} symbols")
+        except Exception as e:
+            print(f"[LTP] Method 2 failed: {e}")
+    
+    # Method 3: Mobile API
+    if not ltp_data:
+        try:
+            response = session.get('https://www.dsebd.org/mobile.php', timeout=15)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                for row in soup.find_all('tr'):
+                    cols = row.find_all('td')
+                    if len(cols) >= 2:
+                        try:
+                            symbol = cols[0].get_text(strip=True)
+                            ltp_text = cols[1].get_text(strip=True).replace(',', '')
+                            ltp = float(ltp_text)
+                            if symbol and ltp:
+                                ltp_data[symbol.upper()] = ltp
+                        except:
+                            continue
+                if ltp_data:
+                    print(f"[LTP] Method 3: Got {len(ltp_data)} symbols")
+        except Exception as e:
+            print(f"[LTP] Method 3 failed: {e}")
+    
+    # NO SAMPLE DATA - only return if we got real data
+    if not ltp_data:
+        print("[LTP] No data from DSE")
         return {
-            "status": "last_valid",
-            "total_symbols": len(ltp_cache["last_valid_data"]),
-            "ltp_data": ltp_cache["last_valid_data"],
-            "source": "cache_last_valid"
+            "status": "error",
+            "total_symbols": 0,
+            "ltp_data": {},
+            "source": "none",
+            "message": "Unable to fetch LTP data from DSE"
         }
-
-    return {
-        "status": "error",
-        "message": "Unable to fetch LTP data from DSE",
-        "ltp_data": {},
-        "source": "none"
+    
+    result = {
+        "status": "live" if market_is_open else "closed",
+        "total_symbols": len(ltp_data),
+        "ltp_data": ltp_data,
+        "source": "dse",
+        "timestamp": time.time()
     }
+    
+    ltp_cache["data"] = result
+    ltp_cache["timestamp"] = get_bd_time()
+    return result
 
 # ================================
 # FIXED: ALL collections use analysis_date
@@ -310,21 +251,13 @@ def build_date_query(date_value):
 def get_latest_date_from_collection(collection_name):
     col = get_mongo_collection(collection_name)
     if col is None: return None
-    doc = col.find_one(
-        {'analysis_date': {'$exists': True, '$ne': None, '$ne': ''}}, 
-        sort=[('analysis_date', -1)]
-    )
+    doc = col.find_one({'analysis_date': {'$exists': True}}, sort=[('analysis_date', -1)])
     if doc and doc.get('analysis_date'):
         val = doc['analysis_date']
         if isinstance(val, str) and len(val) >= 10:
             return val[:10]
         if isinstance(val, datetime):
             return val.strftime('%Y-%m-%d')
-    doc = col.find_one({'saved_at': {'$exists': True}}, sort=[('saved_at', -1)])
-    if doc and doc.get('saved_at'):
-        val = doc['saved_at']
-        if isinstance(val, str) and len(val) >= 10:
-            return val[:10]
     return None
 
 @app.get("/api/dates")
@@ -337,13 +270,6 @@ async def get_dates(collection: str = Query("daily_ai_signals")):
             if d:
                 if isinstance(d, datetime): dates_set.add(d.strftime('%Y-%m-%d'))
                 elif isinstance(d, str) and re.match(r'\d{4}-\d{2}-\d{2}', d.strip()): dates_set.add(d.strip())
-    except: pass
-    try:
-        for doc in col.find({'saved_at': {'$exists': True}}, {'saved_at': 1}).limit(2000):
-            val = doc.get('saved_at', '')
-            if isinstance(val, str) and len(val) >= 10:
-                d = val[:10]
-                if re.match(r'\d{4}-\d{2}-\d{2}', d): dates_set.add(d)
     except: pass
     return sorted(list(dates_set), reverse=True)
 
@@ -496,10 +422,7 @@ async def update_trade(
 ):
     col = get_mongo_collection(collection)
     if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-    update_fields = {
-        'edited': True, 
-        'edited_at': datetime.now().isoformat()
-    }
+    update_fields = {'edited': True, 'edited_at': datetime.now().isoformat()}
     if entry_price is not None: update_fields['entry_price'] = entry_price
     if stop_loss is not None: update_fields['stop_loss'] = stop_loss
     if target_price is not None: update_fields['target_price'] = target_price
@@ -510,15 +433,9 @@ async def update_trade(
         reward = abs(target_price - entry_price)
         if risk > 0:
             update_fields['risk_reward_ratio'] = round(reward / risk, 2)
-    result = col.update_one(
-        {'symbol': symbol, 'analysis_date': date}, 
-        {'$set': update_fields}
-    )
+    result = col.update_one({'symbol': symbol, 'analysis_date': date}, {'$set': update_fields})
     if result.matched_count == 0:
-        result = col.update_one(
-            {'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}}, 
-            {'$set': update_fields}
-        )
+        result = col.update_one({'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}}, {'$set': update_fields})
     return {"updated": result.modified_count, "matched": result.matched_count}
 
 @app.get("/api/collection-symbols")
@@ -572,10 +489,7 @@ async def dashboard():
         .alert-config-btn { background: #ffa500; color: #000; font-weight: bold; }
         .trade-btn { background: #00cc66; color: #000; font-weight: bold; margin-left: auto; }
         table { width: 100%; border-collapse: collapse; font-size: 0.7em; background: #111122; border-radius: 10px; overflow-x: auto; display: block; }
-        th { background: #1a1a2e; padding: 10px 5px; color: #00d4ff; white-space: nowrap; cursor: pointer; user-select: none; position: sticky; top: 0; }
-        th:hover { background: #1e1e38; }
-        th.sorted { color: #ffa500; }
-        .sort-indicator { font-size: 0.8em; margin-left: 3px; }
+        th { background: #1a1a2e; padding: 10px 5px; color: #00d4ff; white-space: nowrap; cursor: pointer; }
         td { padding: 5px; border-bottom: 1px solid #222; white-space: nowrap; }
         .edit-btn { background: #ffa500; color: #000; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
         .delete-btn { background: #ff4757; color: #fff; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
@@ -583,34 +497,13 @@ async def dashboard():
         .trade-edit-btn { background: #7b2ff7; color: #fff; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; font-weight: bold; min-width: 50px; }
         .edited-badge { background: #ffa500; color: #000; padding: 2px 6px; border-radius: 10px; font-size: 0.7em; margin-left: 5px; }
         .trade-badge { background: #cc00cc; color: #fff; padding: 2px 6px; border-radius: 10px; font-size: 0.7em; margin-left: 5px; }
-        .editable-input { background: #1a1a2e; color: #fff; border: 1px solid #ffa500; padding: 3px; width: 65px; border-radius: 4px; font-size: 0.9em; }
-        .signal-SB { color: #00ff88; font-weight: bold; }
-        .signal-B { color: #00cc66; font-weight: bold; }
-        .signal-H { color: #ffd700; }
-        .signal-S { color: #ff4757; }
-        .signal-SS { color: #ff0000; font-weight: bold; }
-        .ltp-alert-row { animation: ltpBlink 0.6s infinite; }
-        @keyframes ltpBlink { 0%,100% { background: #ff475730; } 50% { background: #ff475760; } }
         .ltp-above { color: #00ff88 !important; font-weight: bold; }
         .ltp-below { color: #ff4757 !important; font-weight: bold; }
-        .ltp-break-high { background: linear-gradient(90deg, #00ff8818, #0a0a0f) !important; border-left: 4px solid #00ff88 !important; animation: highBreakPulse 2s infinite; }
-        @keyframes highBreakPulse { 0%,100% { background: #00ff8810; } 50% { background: #00ff8825; } }
-        .ltp-break-badge { background: #00ff88; color: #000; padding: 2px 6px; border-radius: 10px; font-size: 0.7em; margin-left: 5px; font-weight: bold; animation: badgePulse 1s infinite; }
-        @keyframes badgePulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
-        .rrr-high { color: #00ff88; font-weight: bold; }
-        .rrr-medium { color: #ffd700; }
-        .rrr-low { color: #ff4757; }
-        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; overflow-y: auto; }
+        .ltp-break-high { background: #00ff8818; border-left: 4px solid #00ff88; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; }
         .modal.open { display: flex; }
-        .modal-content { background: #1a1a2e; padding: 25px; border-radius: 15px; max-width: 550px; width: 90%; border: 2px solid #ffa500; max-height: 90vh; overflow-y: auto; }
-        .trade-modal-content { border-color: #00cc66; }
-        .modal-content h3 { color: #ffa500; margin-bottom: 15px; }
-        .trade-modal-content h3 { color: #00cc66; }
-        .modal-content select, .modal-content input { width: 100%; padding: 10px; margin-bottom: 10px; }
-        .modal-buttons { display: flex; gap: 10px; margin-top: 15px; }
-        .modal-buttons button { flex: 1; }
+        .modal-content { background: #1a1a2e; padding: 25px; border-radius: 15px; max-width: 500px; width: 90%; }
         .trade-summary { background: #0f3460; padding: 15px; border-radius: 10px; margin: 15px 0; }
-        .trade-summary span { display: block; margin: 5px 0; }
         @media (max-width: 768px) { .header h1 { font-size: 1.5em; } }
     </style>
 </head>
@@ -618,10 +511,7 @@ async def dashboard():
     <div class="header">
         <h1>🤖 AI Trading Signals Dashboard</h1>
         <p id="marketStatus">Checking DSE status...</p>
-        <button id="installBtn" onclick="installApp()" 
-            style="display:none; background:#00d4ff; color:#000; border:none; padding:10px 20px; border-radius:8px; cursor:pointer; font-weight:bold; margin-top:10px;">
-                📲 Install App
-        </button>
+        <button id="installBtn" onclick="installApp()" style="display:none; background:#00d4ff; color:#000; border:none; padding:10px 20px; border-radius:8px; cursor:pointer; font-weight:bold; margin-top:10px;">📲 Install App</button>
     </div>
     <div id="alertBox" class="alert-box">⚠️ DSE CLOSING IN 10 MINUTES!</div>
     <div class="tabs">
@@ -631,7 +521,7 @@ async def dashboard():
         <div class="tab" onclick="switchTab('ema')">📈 EMA 21</div>
         <div class="tab" onclick="switchTab('buy')">✅ Daily Buy</div>
     </div>
-    <div class="controls" id="allControls">
+    <div class="controls">
         <label>📅 Date:</label>
         <select id="dateSelect" onchange="loadCurrentTab()"><option value="">Latest</option></select>
         <label>🔍 Symbol:</label>
@@ -644,12 +534,12 @@ async def dashboard():
         <span id="recordCount" style="color:#888;"></span>
     </div>
     
-    <div id="alertModal" class="modal"><div class="modal-content"><h3>🔔 Configure LTP Alerts</h3><label>📋 Select Symbol:</label><select id="alertSymbolSelect"><option value="">-- Loading... --</option></select><label>📊 Condition:</label><select id="alertCondition"><option value="above">LTP উপরে গেলে Alert</option><option value="below">LTP নিচে গেলে Alert</option></select><label>💰 Threshold Price:</label><input type="number" id="alertThresholdPrice" placeholder="Enter price..." step="0.01"><div class="modal-buttons"><button class="save-btn" onclick="addAlertRule()">➕ Add Alert</button><button onclick="closeAlertModal()">Cancel</button></div><div id="currentAlertsSection" style="margin-top:15px;background:#0f3460;padding:10px;border-radius:8px;display:none;"><h4 style="color:#ffa500;">Active Alerts:</h4><div id="currentAlertsList"></div></div></div></div>
+    <div id="alertModal" class="modal"><div class="modal-content"><h3>🔔 Configure LTP Alerts</h3><label>📋 Select Symbol:</label><select id="alertSymbolSelect"></select><label>📊 Condition:</label><select id="alertCondition"><option value="above">LTP উপরে গেলে Alert</option><option value="below">LTP নিচে গেলে Alert</option></select><label>💰 Threshold Price:</label><input type="number" id="alertThresholdPrice" placeholder="Enter price..." step="0.01"><div class="modal-buttons"><button class="save-btn" onclick="addAlertRule()">➕ Add Alert</button><button onclick="closeAlertModal()">Cancel</button></div><div id="currentAlertsSection" style="margin-top:15px;display:none;"><h4>Active Alerts:</h4><div id="currentAlertsList"></div></div></div></div>
     
-    <div id="tradeModal" class="modal"><div class="modal-content trade-modal-content"><h3>💰 Trade Management</h3><label>📋 Select Symbol:</label><select id="tradeSymbolSelect" onchange="onTradeSymbolChange()"><option value="">-- Loading... --</option></select><label>📊 Entry Price:</label><input type="number" id="tradeEntryPrice" placeholder="Enter entry price..." step="0.01" oninput="calculateTradeStats()"><label>🛑 Stop Loss:</label><input type="number" id="tradeStopLoss" placeholder="Enter stop loss..." step="0.01" oninput="calculateTradeStats()"><label>🎯 Target Price:</label><input type="number" id="tradeTargetPrice" placeholder="Enter target price..." step="0.01" oninput="calculateTradeStats()"><label>💵 Total Exposure (Taka):</label><input type="number" id="tradeTotalExposure" placeholder="Total capital in Taka..." step="0.01" oninput="calculateTradeStats()"><label>⚠️ Risk %:</label><input type="number" id="tradeRiskPercent" placeholder="Risk percentage (e.g., 2)..." step="0.01" oninput="calculateTradeStats()"><div class="trade-summary" id="tradeSummary" style="display:none;"><span>📊 <strong>Risk/Reward Ratio:</strong> <span id="tradeRRR">-</span></span><span>💸 <strong>Risk Amount:</strong> ৳<span id="tradeRiskAmount">0</span></span><span>🎯 <strong>Potential Profit:</strong> ৳<span id="tradeProfitAmount">0</span></span><span>📈 <strong>Quantity:</strong> <span id="tradeQuantity">0</span> shares</span></div><div class="modal-buttons"><button class="save-btn" onclick="saveTrade()">💾 Save Trade</button><button onclick="closeTradeModal()">Cancel</button></div></div></div>
+    <div id="tradeModal" class="modal"><div class="modal-content"><h3>💰 Trade Management</h3><label>📋 Select Symbol:</label><select id="tradeSymbolSelect" onchange="onTradeSymbolChange()"></select><label>📊 Entry Price:</label><input type="number" id="tradeEntryPrice" step="0.01" oninput="calculateTradeStats()"><label>🛑 Stop Loss:</label><input type="number" id="tradeStopLoss" step="0.01" oninput="calculateTradeStats()"><label>🎯 Target Price:</label><input type="number" id="tradeTargetPrice" step="0.01" oninput="calculateTradeStats()"><label>💵 Total Exposure (Taka):</label><input type="number" id="tradeTotalExposure" step="0.01" oninput="calculateTradeStats()"><label>⚠️ Risk %:</label><input type="number" id="tradeRiskPercent" step="0.01" oninput="calculateTradeStats()"><div class="trade-summary" id="tradeSummary" style="display:none;"><span>📊 Risk/Reward Ratio: <span id="tradeRRR">-</span></span><span>💸 Risk Amount: ৳<span id="tradeRiskAmount">0</span></span><span>🎯 Potential Profit: ৳<span id="tradeProfitAmount">0</span></span><span>📈 Quantity: <span id="tradeQuantity">0</span> shares</span></div><div class="modal-buttons"><button class="save-btn" onclick="saveTrade()">💾 Save Trade</button><button onclick="closeTradeModal()">Cancel</button></div></div></div>
     
-    <div id="alertStatusBar" style="background:#0f3460;padding:6px 12px;border-radius:6px;margin-bottom:8px;display:none;color:#ffa500;font-size:0.8em;"></div>
-    <div id="sortStatus" style="background:#1a1a2e;padding:6px 12px;border-radius:6px;margin-bottom:8px;color:#00d4ff;font-size:0.8em;"></div>
+    <div id="alertStatusBar" style="background:#0f3460;padding:6px 12px;border-radius:6px;margin-bottom:8px;display:none;"></div>
+    <div id="sortStatus" style="background:#1a1a2e;padding:6px 12px;border-radius:6px;margin-bottom:8px;"></div>
     <div style="overflow-x:auto;" id="dynamicTable"></div>
 
     <script>
@@ -658,11 +548,6 @@ async def dashboard():
         let dseLtpData = {};
         let editingRow = null;
         let alertRules = [];
-        let currentTradeSymbol = null;
-        
-        let ltpUpdateInterval = null;
-        let isMarketOpen = false;
-        
         let currentSort = { field: null, order: null };
 
         const COLLECTION_MAP = { 
@@ -683,13 +568,13 @@ async def dashboard():
         updateSortStatus();
 
         function loadAlertRules() {
-            const saved = localStorage.getItem('ltpAlertRules_v30');
+            const saved = localStorage.getItem('ltpAlertRules');
             if (saved) { try { alertRules = JSON.parse(saved); } catch(e) { alertRules = []; } }
             updateAlertUI();
         }
         
         function saveAlertRules() { 
-            localStorage.setItem('ltpAlertRules_v30', JSON.stringify(alertRules)); 
+            localStorage.setItem('ltpAlertRules', JSON.stringify(alertRules)); 
             updateAlertUI(); 
             renderCurrentTab(); 
         }
@@ -698,8 +583,7 @@ async def dashboard():
             const bar = document.getElementById('alertStatusBar');
             if (alertRules.length > 0) {
                 bar.style.display = 'block';
-                bar.innerHTML = '🔔 <strong>' + alertRules.length + ' Alert(s):</strong> ' + 
-                    alertRules.map(r => r.symbol + ' ' + (r.condition === 'above' ? '↑>' : '↓<') + ' ' + r.threshold).join(' | ');
+                bar.innerHTML = '🔔 <strong>' + alertRules.length + ' Alert(s):</strong> ' + alertRules.map(r => r.symbol + ' ' + (r.condition === 'above' ? '↑>' : '↓<') + ' ' + r.threshold).join(' | ');
             } else {
                 bar.style.display = 'none';
             }
@@ -708,11 +592,9 @@ async def dashboard():
         function updateSortStatus() {
             const statusDiv = document.getElementById('sortStatus');
             if (currentSort.field) {
-                statusDiv.innerHTML = '📊 <strong>Sorted by:</strong> ' + currentSort.field + ' (' + currentSort.order.toUpperCase() + ') | <span style="cursor:pointer;color:#ffa500;" onclick="resetSort()">↺ Reset to Default</span>';
-                statusDiv.style.display = 'block';
+                statusDiv.innerHTML = '📊 Sorted by: ' + currentSort.field + ' (' + currentSort.order.toUpperCase() + ') | <span style="cursor:pointer;color:#ffa500;" onclick="resetSort()">↺ Reset</span>';
             } else {
-                statusDiv.innerHTML = '📊 <strong>Default Sort:</strong> diff ASC (↓low first), gape DESC (↑high first)';
-                statusDiv.style.display = 'block';
+                statusDiv.innerHTML = '📊 Default Sort: diff ASC, gape DESC';
             }
         }
 
@@ -735,23 +617,15 @@ async def dashboard():
 
         function getSortIndicator(field) {
             if (currentSort.field === field) {
-                return '<span class="sort-indicator">' + (currentSort.order === 'asc' ? '▲' : '▼') + '</span>';
+                return currentSort.order === 'asc' ? ' ▲' : ' ▼';
             }
-            if (!currentSort.field) {
-                if (field === 'diff') return '<span class="sort-indicator" style="color:#ffa500;">▲</span>';
-                if (field === 'gape') return '<span class="sort-indicator" style="color:#ffa500;">▼</span>';
-            }
-            return '<span class="sort-indicator" style="opacity:0.3;">⇅</span>';
+            return '';
         }
 
         async function checkMarketStatus() {
             const res = await fetch('/api/market-status');
             const s = await res.json();
-            isMarketOpen = s.is_open;
-            document.getElementById('marketStatus').innerHTML = s.is_open 
-                ? `🟢 DSE MARKET OPEN | ${s.bangladesh_time || ''}`
-                : `🔴 DSE CLOSED | Opens ${s.next_open || 'next session'} | ${s.bangladesh_time || ''}`;
-            document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
+            document.getElementById('marketStatus').innerHTML = s.is_open ? '🟢 DSE MARKET OPEN' : '🔴 DSE CLOSED';
         }
 
         async function loadDseLtp() {
@@ -760,10 +634,13 @@ async def dashboard():
                 const j = await r.json();
                 if (j.ltp_data && Object.keys(j.ltp_data).length > 0) {
                     dseLtpData = j.ltp_data;
+                    console.log('LTP loaded:', Object.keys(dseLtpData).length, 'symbols from', j.source);
                     renderCurrentTab();
+                } else {
+                    console.log('No LTP data available');
                 }
             } catch(e) {
-                console.error('LTP fetch error:', e.message);
+                console.error('LTP error:', e);
             }
         }
 
@@ -818,8 +695,7 @@ async def dashboard():
             event.target.classList.add('active');
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
-            loadDates(map[t]);
+            loadDates(COLLECTION_MAP[t]);
             loadCurrentTab();
         }
 
@@ -828,7 +704,6 @@ async def dashboard():
             if (s.includes('STRONG BUY')) return 'signal-SB';
             if (s.includes('BUY')) return 'signal-B';
             if (s.includes('HOLD')) return 'signal-H';
-            if (s.includes('STRONG SELL')) return 'signal-SS';
             if (s.includes('SELL')) return 'signal-S';
             return '';
         }
@@ -871,15 +746,13 @@ async def dashboard():
         }
 
         function getRowClass(symbol, highPrice) {
-            const alertStatus = getLtpAlertStatus(symbol);
             const ltpBreakHigh = isLtpAboveHigh(symbol, highPrice);
             if (ltpBreakHigh) return 'ltp-break-high';
-            if (alertStatus === 'above' || alertStatus === 'below') return 'ltp-alert-row';
             return '';
         }
 
         function getRRRClass(rrr) {
-            if (!rrr || rrr === 0) return '';
+            if (!rrr) return '';
             if (rrr >= 2) return 'rrr-high';
             if (rrr >= 1) return 'rrr-medium';
             return 'rrr-low';
@@ -898,7 +771,6 @@ async def dashboard():
                 const reward = Math.abs(tp - entry);
                 const rrr = risk > 0 ? (reward / risk).toFixed(2) : '0';
                 document.getElementById('tradeRRR').textContent = rrr;
-                document.getElementById('tradeRRR').className = getRRRClass(parseFloat(rrr));
                 if (exposure > 0 && riskPct > 0) {
                     const riskAmount = (exposure * riskPct) / 100;
                     const quantity = risk > 0 ? Math.floor(riskAmount / risk) : 0;
@@ -914,8 +786,6 @@ async def dashboard():
 
         async function onTradeSymbolChange() {
             const symbol = document.getElementById('tradeSymbolSelect').value;
-            if (!symbol || symbol.includes('--')) return;
-            currentTradeSymbol = symbol;
             const record = currentData.find(r => r.symbol === symbol);
             if (record) {
                 document.getElementById('tradeEntryPrice').value = record.entry_price || '';
@@ -923,12 +793,6 @@ async def dashboard():
                 document.getElementById('tradeTargetPrice').value = record.target_price || '';
                 document.getElementById('tradeTotalExposure').value = record.total_exposure || '';
                 document.getElementById('tradeRiskPercent').value = record.risk_percent || '';
-            } else {
-                document.getElementById('tradeEntryPrice').value = '';
-                document.getElementById('tradeStopLoss').value = '';
-                document.getElementById('tradeTargetPrice').value = '';
-                document.getElementById('tradeTotalExposure').value = '';
-                document.getElementById('tradeRiskPercent').value = '';
             }
             calculateTradeStats();
         }
@@ -938,9 +802,7 @@ async def dashboard():
             await loadTradeSymbols();
         }
         
-        function closeTradeModal() { 
-            document.getElementById('tradeModal').classList.remove('open'); 
-        }
+        function closeTradeModal() { document.getElementById('tradeModal').classList.remove('open'); }
 
         async function loadTradeSymbols() {
             const date = document.getElementById('dateSelect').value;
@@ -952,25 +814,13 @@ async def dashboard():
                 if (date) url += `&date=${date}`;
                 const symbols = await (await fetch(url)).json();
                 select.innerHTML = '<option value="">-- Select Symbol --</option>';
-                if (symbols.length > 0) {
-                    symbols.forEach(s => { 
-                        const o = document.createElement('option'); 
-                        o.value = s; 
-                        o.textContent = s; 
-                        select.appendChild(o); 
-                    });
-                }
-            } catch(e) { 
-                select.innerHTML = '<option value="">Error</option>'; 
-            }
+                symbols.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; select.appendChild(o); });
+            } catch(e) { select.innerHTML = '<option value="">Error</option>'; }
         }
 
         async function saveTrade() {
             const symbol = document.getElementById('tradeSymbolSelect').value;
-            if (!symbol || symbol.includes('--')) {
-                alert('Please select a symbol!');
-                return;
-            }
+            if (!symbol) { alert('Please select a symbol!'); return; }
             const entry = parseFloat(document.getElementById('tradeEntryPrice').value) || 0;
             const sl = parseFloat(document.getElementById('tradeStopLoss').value) || 0;
             const tp = parseFloat(document.getElementById('tradeTargetPrice').value) || 0;
@@ -978,30 +828,20 @@ async def dashboard():
             const riskPct = parseFloat(document.getElementById('tradeRiskPercent').value) || 0;
             const record = currentData.find(r => r.symbol === symbol);
             const date = record ? (record.analysis_date || record.date || '') : '';
-            if (!date) {
-                alert('Could not find date for this symbol!');
-                return;
-            }
+            if (!date) { alert('Could not find date for this symbol!'); return; }
             const collection = COLLECTION_MAP[currentTab];
-            const params = new URLSearchParams({
-                collection: collection,
-                symbol: symbol,
-                date: date
-            });
+            const params = new URLSearchParams({ collection, symbol, date });
             if (entry) params.append('entry_price', entry);
             if (sl) params.append('stop_loss', sl);
             if (tp) params.append('target_price', tp);
             if (exposure) params.append('total_exposure', exposure);
             if (riskPct) params.append('risk_percent', riskPct);
             try {
-                const r = await fetch(`/api/update-trade?${params}`, { method: 'PUT' });
-                const result = await r.json();
-                alert(`Trade saved successfully! (${result.updated} record(s) updated)`);
+                await fetch(`/api/update-trade?${params}`, { method: 'PUT' });
+                alert('Trade saved!');
                 closeTradeModal();
                 loadCurrentTab();
-            } catch(e) {
-                alert('Failed to save trade: ' + e.message);
-            }
+            } catch(e) { alert('Failed: ' + e.message); }
         }
 
         function startEdit(symbol, date, entry, sl, tp, i) { editingRow = { symbol, date, rowIndex: i }; renderAITable(); }
@@ -1012,14 +852,7 @@ async def dashboard():
             const entry = parseFloat(document.getElementById(`edit-entry-${safeId}`).value) || 0;
             const sl = parseFloat(document.getElementById(`edit-sl-${safeId}`).value) || 0;
             const tp = parseFloat(document.getElementById(`edit-tp-${safeId}`).value) || 0;
-            const params = new URLSearchParams({ 
-                collection: COLLECTION_MAP[currentTab],
-                symbol, 
-                date, 
-                entry_price: entry, 
-                stop_loss: sl, 
-                target_price: tp 
-            });
+            const params = new URLSearchParams({ collection: COLLECTION_MAP[currentTab], symbol, date, entry_price: entry, stop_loss: sl, target_price: tp });
             await fetch(`/api/update-trade?${params}`, { method: 'PUT' });
             editingRow = null;
             loadCurrentTab();
@@ -1042,9 +875,7 @@ async def dashboard():
                 if (date) url += `&date=${date}`;
                 const symbols = await (await fetch(url)).json();
                 select.innerHTML = '<option value="">-- Select Symbol --</option>';
-                if (symbols.length > 0) {
-                    symbols.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; select.appendChild(o); });
-                }
+                symbols.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; select.appendChild(o); });
             } catch(e) { select.innerHTML = '<option value="">Error</option>'; }
         }
 
@@ -1053,17 +884,14 @@ async def dashboard():
             const list = document.getElementById('currentAlertsList');
             if (alertRules.length === 0) { section.style.display = 'none'; return; }
             section.style.display = 'block';
-            list.innerHTML = alertRules.map((r, i) => 
-                `<div style="display:flex;justify-content:space-between;background:#1a1a2e;padding:8px;margin:5px 0;border-radius:5px;"><span>🔔 ${r.symbol} ${r.condition==='above'?'↑ Above':'↓ Below'} ${r.threshold}</span><button onclick="removeAlertRule(${i})" style="background:#ff4757;padding:5px;border:none;color:#fff;border-radius:4px;">✕</button></div>`
-            ).join('');
+            list.innerHTML = alertRules.map((r, i) => `<div>🔔 ${r.symbol} ${r.condition==='above'?'↑ Above':'↓ Below'} ${r.threshold} <button onclick="removeAlertRule(${i})">✕</button></div>`).join('');
         }
 
         function addAlertRule() {
             const symbol = document.getElementById('alertSymbolSelect').value;
             const condition = document.getElementById('alertCondition').value;
             const threshold = parseFloat(document.getElementById('alertThresholdPrice').value);
-            if (!symbol || symbol.includes('--')) return;
-            if (!threshold) return;
+            if (!symbol || !threshold) return;
             alertRules = alertRules.filter(r => r.symbol !== symbol);
             alertRules.push({ symbol, condition, threshold });
             saveAlertRules();
@@ -1076,7 +904,7 @@ async def dashboard():
         async function deleteAllByDate() {
             const date = document.getElementById('dateSelect').value;
             if (!date) { alert('Select a date first!'); return; }
-            if (!confirm(`DELETE ALL records for ${date}?`)) return;
+            if (!confirm(`Delete ALL records for ${date}?`)) return;
             const collection = COLLECTION_MAP[currentTab];
             const r = await fetch(`/api/delete-all-by-date?collection=${collection}&date=${date}`, { method: 'DELETE' });
             const result = await r.json();
@@ -1087,108 +915,57 @@ async def dashboard():
 
         async function deleteRecord(symbol, date, tab = 'ai_signals') {
             if (!confirm(`Delete ${symbol}?`)) return;
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
-            await fetch(`/api/delete-signal?collection=${map[tab]}&symbol=${symbol}&date=${date}`, { method: 'DELETE' });
+            await fetch(`/api/delete-signal?collection=${COLLECTION_MAP[tab]}&symbol=${symbol}&date=${date}`, { method: 'DELETE' });
             loadCurrentTab();
         }
 
-        // ==================== renderAITable ====================
         function renderAITable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
+            if (!currentData.length) { div.innerHTML = '<p style="text-align:center;padding:40px;">No data</p>'; return; }
             
-            let html = `<table><thead><tr>
-                <th>#</th>
-                <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
-                <th>Date</th>
-                <th onclick="handleSort('current_price')">Price${getSortIndicator('current_price')}</th>
-                <th>LTP</th>
-                <th>Sector</th>
-                <th onclick="handleSort('final_signal')">Signal${getSortIndicator('final_signal')}</th>
-                <th onclick="handleSort('final_combined_score')">Score${getSortIndicator('final_combined_score')}</th>
-                <th>LLM</th><th>LLM%</th><th>LLM Str</th>
-                <th>LLM Bias</th><th>LLM Av</th>
-                <th>XGB</th><th>XGB%</th><th>XGB Pr</th><th>AUC</th><th>XGB Av</th>
-                <th>PPO</th><th>PPO%</th><th>PPO Av</th><th>PPO Wt</th>
-                <th>Agentic</th><th>Ag Bias</th><th>Ag Av</th>
-                <th>E Acc</th><th>E Tot</th><th>E Wave</th><th>Sub-Wave</th>
-                <th>Cur Wave</th><th>W Conf</th><th>Bull?</th><th>W Pos</th>
-                <th onclick="handleSort('diff')">Diff${getSortIndicator('diff')}</th>
-                <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
-                <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
-                <th>Act</th>
-            </tr></thead><tbody>`;
+            let html = `<table><thead><tr><th>#</th><th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th><th>Date</th><th>Price</th><th>LTP</th><th>Sector</th><th>Signal</th><th>Score</th><th>LLM</th><th>LLM%</th><th>XGB</th><th>XGB%</th><th>PPO</th><th>PPO%</th><th>Agentic</th><th>E Acc</th><th>Diff</th><th>Gape</th><th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>`;
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
                 const safeId = (r.symbol || '').replace(/[^a-zA-Z0-9]/g, '_');
-                const isEditing = editingRow && editingRow.symbol === r.symbol && editingRow.date === r.analysis_date;
-                const isEdited = r.edited === true;
-                const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
-                const highPrice = r.high || r.current_high || r.breakout_high || r.last_high || 0;
+                const isEditing = editingRow && editingRow.symbol === r.symbol;
+                const isEdited = r.edited;
+                const hasTrade = r.entry_price || r.stop_loss || r.target_price;
+                const highPrice = r.high || 0;
                 const ltpDisplay = getLtpDisplay(r.symbol, highPrice);
-                const alertStatus = getLtpAlertStatus(r.symbol);
                 const ltpBreakHigh = isLtpAboveHigh(r.symbol, highPrice);
                 const rowClass = getRowClass(r.symbol, highPrice);
-                let rrr = r.risk_reward_ratio || 0;
-                if (rrr === 0 && r.entry_price && r.stop_loss && r.target_price) {
-                    const risk = Math.abs(r.entry_price - r.stop_loss);
-                    const reward = Math.abs(r.target_price - r.entry_price);
-                    if (risk > 0) rrr = reward / risk;
-                }
+                const rrr = r.risk_reward_ratio || 0;
                 const rrrClass = getRRRClass(rrr);
-                const entryCell = isEditing ? `<input class="editable-input" id="edit-entry-${safeId}" value="${(r.entry_price||0).toFixed(2)}">` : (r.entry_price ? `<span style="color:#00ff88;">${r.entry_price.toFixed(2)}</span>` : '-');
-                const slCell = isEditing ? `<input class="editable-input" id="edit-sl-${safeId}" value="${(r.stop_loss||0).toFixed(2)}">` : (r.stop_loss ? `<span style="color:#ff4757;">${r.stop_loss.toFixed(2)}</span>` : '-');
-                const tpCell = isEditing ? `<input class="editable-input" id="edit-tp-${safeId}" value="${(r.target_price||0).toFixed(2)}">` : (r.target_price ? `<span style="color:#00d4ff;">${r.target_price.toFixed(2)}</span>` : '-');
-                const actionCell = isEditing 
-                    ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date}')">💾</button><button class="delete-btn" onclick="cancelEdit()">❌</button>`
-                    : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}','${r.entry_price||0}','${r.stop_loss||0}','${r.target_price||0}',${i})">✏️</button><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}')">🗑️</button>`;
-                const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
-                const diffVal = r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-';
-                const gapeVal = r.gape !== undefined ? r.gape.toFixed(2) : '-';
+                const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀</span>' : '';
+                const entryCell = isEditing ? `<input class="editable-input" id="edit-entry-${safeId}" value="${(r.entry_price||0).toFixed(2)}">` : (r.entry_price ? r.entry_price.toFixed(2) : '-');
+                const slCell = isEditing ? `<input class="editable-input" id="edit-sl-${safeId}" value="${(r.stop_loss||0).toFixed(2)}">` : (r.stop_loss ? r.stop_loss.toFixed(2) : '-');
+                const tpCell = isEditing ? `<input class="editable-input" id="edit-tp-${safeId}" value="${(r.target_price||0).toFixed(2)}">` : (r.target_price ? r.target_price.toFixed(2) : '-');
+                const actionCell = isEditing ? `<button class="save-btn" onclick="saveEdit('${r.symbol}','${r.analysis_date}')">💾</button><button onclick="cancelEdit()">❌</button>` : `<button class="edit-btn" onclick="startEdit('${r.symbol}','${r.analysis_date}')">✏️</button><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}')">🗑️</button>`;
                 
                 html += `<tr class="${rowClass}">
                     <td>${i+1}</td>
-                    <td><strong>${r.symbol || ''}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
+                    <td><strong>${r.symbol}${isEdited ? ' ✏️' : ''}${hasTrade ? ' 💰' : ''}${breakBadge}</strong></td>
                     <td>${r.analysis_date || ''}</td>
                     <td>${(r.current_price || 0).toFixed(2)}</td>
                     <td>${ltpDisplay}</td>
                     <td>${r.sector || ''}</td>
                     <td class="${getSignalClass(r.final_signal)}">${r.final_signal || ''}</td>
-                    <td>${(r.final_combined_score || 0).toFixed(1)}</strong></td>
+                    <td>${(r.final_combined_score || 0).toFixed(1)}</td>
                     <td>${r.llm_signal || ''}</td>
                     <td>${(r.llm_confidence || 0).toFixed(0)}%</td>
-                    <td>${r.llm_strength || ''}</td>
-                    <td>${r.llm_bias || ''}</td>
-                    <td>${r.llm_available ? '✅' : '❌'}</td>
                     <td>${r.xgb_signal || ''}</td>
                     <td>${(r.xgb_confidence || 0).toFixed(0)}%</td>
-                    <td>${(r.xgb_prob_up || 0).toFixed(3)}</td>
-                    <td>${(r.xgb_auc || 0).toFixed(3)}</td>
-                    <td>${r.xgb_available ? '✅' : '❌'}</td>
                     <td>${r.ppo_signal || ''}</td>
                     <td>${(r.ppo_confidence || 0).toFixed(0)}%</td>
-                    <td>${r.ppo_available ? '✅' : '❌'}</td>
-                    <td>${r.ppo_weight || 0}</td>
                     <td>${(r.agentic_score || 0).toFixed(1)}</td>
-                    <td>${r.agentic_bias || ''}</td>
-                    <td>${r.agentic_available ? '✅' : '❌'}</td>
                     <td>${(r.elliott_accuracy || 0).toFixed(1)}%</td>
-                    <td>${r.elliott_total_predictions || 0}</td>
-                    <td style="font-size:0.65em;">${(r.elliott_wave_count || '').substring(0,15)}</td>
-                    <td style="font-size:0.65em;max-width:100px;overflow:hidden;">${(r.elliott_sub_waves || '').substring(0,20)}</td>
-                    <td>${r.elliott_current_wave || ''}</td>
-                    <td>${(r.elliott_wave_confidence || 0).toFixed(0)}%</td>
-                    <td>${r.elliott_is_bullish ? '✅' : '❌'}</td>
-                    <td>${r.elliott_wave_position || ''}</td>
-                    <td>${diffVal}</td>
-                    <td>${gapeVal}</td>
+                    <td style="color:#ffd700;">${r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-'}</td>
+                    <td style="color:#00d4ff;">${r.gape !== undefined ? r.gape.toFixed(2) : '-'}</td>
                     <td>${entryCell}</td>
                     <td>${slCell}</td>
                     <td>${tpCell}</td>
-                    <td>${rrr.toFixed(2)}</strong></td>
-                    <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
-                    <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
+                    <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
                     <td>${actionCell}</td>
                 </tr>`;
             }
@@ -1197,145 +974,79 @@ async def dashboard():
             document.getElementById('recordCount').textContent = `(${currentData.length} signals)`;
         }
 
-        // ==================== renderSWRSITable ====================
         function renderSWRSITable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
+            if (!currentData.length) { div.innerHTML = '<p style="text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
             
-            let html = `<tr><thead></tr>
-                <th>#</th>
-                <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
-                <th>Sector</th><th>LTP</th>
-                <th onclick="handleSort('composite_score')">Composite Score${getSortIndicator('composite_score')}</th>
-                <th>Weekly Div</th><th>Weekly Label</th><th>Weekly Score</th>
-                <th>Prev Low</th><th>Curr Low</th><th>Prev RSI</th><th>Curr RSI</th>
-                <th>Price Drop%</th><th>RSI Gain</th>
-                <th>Prev Week</th><th>Curr Week</th>
-                <th>Daily Div</th><th>Daily Strength</th>
-                <th>Daily Last RSI</th><th>Daily Prev RSI</th>
-                <th onclick="handleSort('diff')">Diff${getSortIndicator('diff')}</th>
-                <th onclick="handleSort('gape')">Gape${getSortIndicator('gape')}</th>
-                <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
-                <th>Act</th>
-            </tr></thead><tbody>`;
+            let html = `<table><thead><tr><th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Composite Score</th><th>Weekly Label</th><th>Diff</th><th>Gape</th><th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>`;
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
-                const highPrice = r.high || r.daily_last_high || r.weekly_curr_high || 0;
+                const highPrice = r.high || 0;
                 const ltpDisplay = getLtpDisplay(r.symbol, highPrice);
-                const alertStatus = getLtpAlertStatus(r.symbol);
                 const ltpBreakHigh = isLtpAboveHigh(r.symbol, highPrice);
                 const rowClass = getRowClass(r.symbol, highPrice);
-                const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
-                let rrr = r.risk_reward_ratio || 0;
-                if (rrr === 0 && r.entry_price && r.stop_loss && r.target_price) {
-                    const risk = Math.abs(r.entry_price - r.stop_loss);
-                    const reward = Math.abs(r.target_price - r.entry_price);
-                    if (risk > 0) rrr = reward / risk;
-                }
+                const hasTrade = r.entry_price || r.stop_loss || r.target_price;
+                const rrr = r.risk_reward_ratio || 0;
                 const rrrClass = getRRRClass(rrr);
-                const recordDate = r.analysis_date || r.date || '';
-                const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
+                const breakBadge = ltpBreakHigh ? '🚀' : '';
                 
                 html += `<tr class="${rowClass}">
                     <td>${i+1}</td>
-                    <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
+                    <td><strong>${r.symbol}${hasTrade ? ' 💰' : ''}${breakBadge}</strong></td>
                     <td>${r.sector || ''}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
-                    <td>${r.weekly_divergence || ''}</td>
                     <td>${r.weekly_strength_label || ''}</td>
-                    <td>${r.weekly_strength_score || 0}</td>
-                    <td>${(r.weekly_prev_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_curr_low || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_prev_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_curr_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.weekly_price_drop_pct || 0).toFixed(2)}%</td>
-                    <td>+${(r.weekly_rsi_gain || 0).toFixed(2)}</td>
-                    <td>${r.weekly_prev_date || ''}</td>
-                    <td>${r.weekly_curr_date || ''}</td>
-                    <td>${r.daily_divergence_type || ''}</td>
-                    <td>${r.daily_divergence_strength || ''}</td>
-                    <td>${(r.daily_last_rsi || 0).toFixed(2)}</td>
-                    <td>${(r.daily_prev_rsi || 0).toFixed(2)}</td>
                     <td>${r.diff !== undefined ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '-'}</td>
                     <td>${r.gape !== undefined ? r.gape.toFixed(2) : '-'}</td>
                     <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
                     <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
                     <td>${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
                     <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
-                    <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
-                    <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
-                    <td><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${recordDate}','swrsi')">🗑️</button></td>
+                    <td><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date}','swrsi')">🗑️</button></td>
                 </tr>`;
             }
             html += '</tbody></table>';
             div.innerHTML = html;
         }
 
-        // ==================== renderGenericTable ====================
         function renderGenericTable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
+            if (!currentData.length) { div.innerHTML = '<p style="text-align:center;padding:40px;">No data</p>'; return; }
             
-            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at','p1_date','p2_date','level_date','level_price','type','high_x','high_y','no','prev_high','swing_highs_count','swing_highs_details','uptrand_date','SL','buy','dd','dl','No','low'];
-            const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
+            const keys = Object.keys(currentData[0]).filter(k => !['_id', 'saved_at', 'analysis_date', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at'].includes(k));
             
-            let html = `<table><thead><tr>
-                <th>#</th>
-                <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
-                <th>LTP</th>
-                ${keys.map(k => `<th>${k}</th>`).join('')}
-                <th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
-                <th>Act</th>
-            </tr></thead><tbody>`;
+            let html = `<table><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>${keys.map(k => `<th>${k}</th>`).join('')}<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>`;
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
-                const highPrice = r.high || r.current_high || r.breakout_high || r.last_high || 0;
+                const highPrice = r.high || 0;
                 const ltpDisplay = getLtpDisplay(r.symbol, highPrice);
-                const alertStatus = getLtpAlertStatus(r.symbol);
                 const ltpBreakHigh = isLtpAboveHigh(r.symbol, highPrice);
                 const rowClass = getRowClass(r.symbol, highPrice);
-                const recordDate = r.analysis_date || r.date || r.level_date || (r.saved_at||'').substring(0,10) || '';
-                const hasTrade = r.entry_price || r.stop_loss || r.target_price || r.total_exposure || r.risk_percent;
-                let rrr = r.risk_reward_ratio || 0;
-                if (rrr === 0 && r.entry_price && r.stop_loss && r.target_price) {
-                    const risk = Math.abs(r.entry_price - r.stop_loss);
-                    const reward = Math.abs(r.target_price - r.entry_price);
-                    if (risk > 0) rrr = reward / risk;
-                }
+                const hasTrade = r.entry_price || r.stop_loss || r.target_price;
+                const rrr = r.risk_reward_ratio || 0;
                 const rrrClass = getRRRClass(rrr);
-                const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
+                const breakBadge = ltpBreakHigh ? '🚀' : '';
                 
                 html += `<tr class="${rowClass}">
                     <td>${i+1}</td>
-                    <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
+                    <td><strong>${r.symbol}${hasTrade ? ' 💰' : ''}${breakBadge}</strong></td>
                     <td>${ltpDisplay}</td>
                     ${keys.map(k => {
                         let val = r[k];
                         if (val === undefined || val === null) val = '';
-                        if (k === 'diff') {
-                            return `<td style="color:#ffd700;font-weight:bold;">${val !== '' ? (val > 0 ? '+' : '') + Number(val).toFixed(2) : '-'}</td>`;
-                        }
-                        if (k === 'gape') {
-                            return `<td style="color:#00d4ff;font-weight:bold;">${val !== '' ? Number(val).toFixed(2) : '-'}</td>`;
-                        }
-                        if (typeof val === 'number') {
-                            if (k === 'rt') {
-                                return `<td>${val.toFixed(2)}%</td>`;
-                            }
-                            return `<td>${val.toFixed(2)}</td>`;
-                        }
+                        if (k === 'diff') return `<td style="color:#ffd700;">${val !== '' ? (val > 0 ? '+' : '') + Number(val).toFixed(2) : '-'}</td>`;
+                        if (k === 'gape') return `<td style="color:#00d4ff;">${val !== '' ? Number(val).toFixed(2) : '-'}</td>`;
+                        if (typeof val === 'number') return `<td>${val.toFixed(2)}</td>`;
                         return `<td>${val}</td>`;
                     }).join('')}
-                    <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}</td>
+                    <td>${r.entry_price ? r.entry_price.toFixed(2) : '-'}<td>
                     <td>${r.stop_loss ? r.stop_loss.toFixed(2) : '-'}</td>
                     <td>${r.target_price ? r.target_price.toFixed(2) : '-'}</td>
                     <td class="${rrrClass}"><strong>${rrr.toFixed(2)}</strong></td>
-                    <td>${r.total_exposure ? '৳'+r.total_exposure.toLocaleString() : '-'}</td>
-                    <td>${r.risk_percent ? r.risk_percent.toFixed(1)+'%' : '-'}</td>
-                    <td><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol||''}','${recordDate}','${currentTab}')">🗑️</button></td>
+                    <td><button class="trade-edit-btn" onclick="openTradeForSymbol('${r.symbol}')">💰</button><button class="delete-btn" onclick="deleteRecord('${r.symbol}','${r.analysis_date || r.date || ''}','${currentTab}')">🗑️</button></td>
                 </tr>`;
             }
             html += '</tbody></table>';
@@ -1351,7 +1062,6 @@ async def dashboard():
             openTradeModal();
         }
 
-        // PWA Install
         let deferredPrompt;
         window.addEventListener('beforeinstallprompt', (e) => {
             e.preventDefault();
@@ -1362,24 +1072,13 @@ async def dashboard():
         function installApp() {
             if (deferredPrompt) {
                 deferredPrompt.prompt();
-                deferredPrompt.userChoice.then((choiceResult) => {
-                    if (choiceResult.outcome === 'accepted') {
-                        console.log('✅ User installed the app');
-                    }
-                    deferredPrompt = null;
-                    document.getElementById('installBtn').style.display = 'none';
-                });
+                deferredPrompt = null;
+                document.getElementById('installBtn').style.display = 'none';
             }
         }
 
-        if (window.matchMedia('(display-mode: standalone)').matches) {
-            document.getElementById('installBtn').style.display = 'none';
-        }
-
         if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/sw.js');
-            });
+            window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js'); });
         }
     </script>
 </body>
