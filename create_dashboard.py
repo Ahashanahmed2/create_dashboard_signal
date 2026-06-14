@@ -326,86 +326,118 @@ ltp_cache = {"data": {}, "timestamp": None}
 
 def parse_dse_table(html_text):
     """
-    DSE টেবিল থেকে LTP বের করার সঠিক পদ্ধতি:
+    DSE টেবিল থেকে LTP বের করার অতি-সরল পদ্ধতি:
     
     টেবিল স্ট্রাকচার:
-    table > tbody > tr
-        td[0] = # (সিরিয়াল)
-        td[1] = TRADING CODE (<a> ট্যাগে symbol)
-        td[2] = LTP*
-        td[3] = HIGH
-        td[4] = LOW
-        ...
+    <table class="shares-table">
+      <tbody>
+        <tr>  <!-- Header: th -->
+          <th>#</th> <th>TRADING CODE</th> <th>LTP*</th> ...
+        </tr>
+        <tr>  <!-- Data: td -->
+          <td>1</td>
+          <td><a href="...">AAMRANET</a></td>
+          <td>19.1</td>  ← LTP (3rd td, index 2)
+          <td>19.5</td>
+          ...
+        </tr>
+      </tbody>
+    </table>
     
-    কিন্তু আপনি বলেছেন LTP td[3] তে আছে!
-    তার মানে:
-        td[0] = #
-        td[1] = TRADING CODE (symbol)
-        td[2] = LTP*
-        td[3] = HIGH
-        td[4] = LOW
-        ...
-    
-    LTP: td[2] (3rd td, 0-based index 2)
-    Symbol: td[1] (2nd td, 0-based index 1)
+    LTP পেতে:
+    1. tbody > tr খুঁজি
+    2. header row (th) skip করি
+    3. td[1] থেকে symbol (a tag)
+    4. td[2] থেকে LTP (টেক্সট)
     """
     
     soup = BeautifulSoup(html_text, 'html.parser')
     ltp_data = {}
     
-    # সরাসরি tbody খুঁজে বের করি
+    # সরাসরি tbody খুঁজি
     tbodies = soup.find_all('tbody')
+    
+    print(f"[PARSER] Found {len(tbodies)} tbody elements")
     
     for tbody in tbodies:
         rows = tbody.find_all('tr')
+        print(f"[PARSER] tbody has {len(rows)} rows")
         
-        for row in rows:
-            cells = row.find_all('td')
-            
-            # Header row skip
-            if len(cells) < 3:
+        for row_idx, row in enumerate(rows):
+            # Skip header row
+            th_cells = row.find_all('th')
+            if th_cells:
+                print(f"[PARSER] Row {row_idx}: HEADER (skip)")
                 continue
             
-            # 🔑 SYMBOL: td[1] থেকে <a> ট্যাগ
+            # Get all td cells
+            td_cells = row.find_all('td')
+            print(f"[PARSER] Row {row_idx}: {len(td_cells)} td cells")
+            
+            if len(td_cells) < 3:
+                print(f"[PARSER] Row {row_idx}: Not enough cells (need 3, got {len(td_cells)})")
+                continue
+            
+            # Symbol: td[1] -> find <a> tag
             symbol = None
             try:
-                a_tag = cells[1].find('a')
+                a_tag = td_cells[1].find('a')
                 if a_tag:
                     symbol = a_tag.get_text(strip=True)
+                    print(f"[PARSER] Row {row_idx}: Symbol from <a> = '{symbol}'")
                 else:
-                    symbol = cells[1].get_text(strip=True)
-            except:
+                    symbol = td_cells[1].get_text(strip=True)
+                    print(f"[PARSER] Row {row_idx}: Symbol from text = '{symbol}'")
+            except Exception as e:
+                print(f"[PARSER] Row {row_idx}: Symbol error: {e}")
                 continue
             
-            if not symbol or len(symbol) < 2:
+            if not symbol or len(symbol.strip()) < 2:
+                print(f"[PARSER] Row {row_idx}: Invalid symbol: '{symbol}'")
                 continue
             
-            # 🔑 LTP: td[2] থেকে (3rd td)
+            # LTP: td[2] -> direct text
             ltp = None
             try:
-                ltp_text = cells[2].get_text(strip=True)
+                ltp_text = td_cells[2].get_text(strip=True)
+                print(f"[PARSER] Row {row_idx}: LTP text = '{ltp_text}'")
+                
+                # কমা রিমুভ করুন (যেমন: "1,439.2")
                 ltp_text = ltp_text.replace(',', '')
+                
+                # ফ্লোটে কনভার্ট
                 ltp = float(ltp_text)
                 
-                if ltp <= 0 or ltp > 50000:
+                # ভ্যালিডেশন
+                if ltp > 0 and ltp < 50000:
+                    print(f"[PARSER] Row {row_idx}: Valid LTP = {ltp}")
+                else:
+                    print(f"[PARSER] Row {row_idx}: LTP out of range: {ltp}")
                     ltp = None
-            except:
-                pass
+            except Exception as e:
+                print(f"[PARSER] Row {row_idx}: LTP error: {e}")
+                continue
             
             if symbol and ltp:
-                ltp_data[symbol.upper().strip()] = ltp
+                clean_symbol = symbol.upper().strip()
+                ltp_data[clean_symbol] = ltp
+                print(f"[PARSER] ✅ Added: {clean_symbol} = {ltp}")
         
+        # যদি ডাটা পাই, তাহলে প্রথম tbody থেকেই রিটার্ন
         if len(ltp_data) > 10:
             break
     
-    print(f"📊 LTP Data Found: {len(ltp_data)} symbols")
-    if len(ltp_data) > 0:
-        # প্রথম 3টা দেখাই ডিবাগের জন্য
-        sample = list(ltp_data.items())[:3]
-        print(f"📊 Sample: {sample}")
+    print(f"[PARSER] Total symbols found: {len(ltp_data)}")
+    
+    if len(ltp_data) == 0:
+        print("[PARSER] ❌ No data found! Debugging...")
+        # ডিবাগ: HTML এর প্রথম 2000 characters
+        print(f"[PARSER] HTML preview: {html_text[:2000]}")
+        # ডিবাগ: table আছে কিনা
+        tables = soup.find_all('table')
+        print(f"[PARSER] Total tables in HTML: {len(tables)}")
     
     return ltp_data
-
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
     """DSE থেকে LTP ডাটা ফেচ করুন - মার্কেট বন্ধ থাকলেও ডাটা ফেচ করবে"""
