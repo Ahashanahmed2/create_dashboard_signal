@@ -628,16 +628,13 @@ async def dashboard():
             buy: 'daily_buy_signals' 
         };
 
-        // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {
-            // Tab click handlers
             document.querySelectorAll('.tab').forEach(tab => {
                 tab.addEventListener('click', function() {
                     const tabId = this.getAttribute('data-tab');
                     if (tabId) switchTab(tabId);
                 });
             });
-            
             loadDates(COLLECTION_MAP[currentTab]);
             loadCurrentTab();
             checkMarketStatus();
@@ -1005,7 +1002,7 @@ async def dashboard():
                 const actionCell = isEditing ? '<button class="save-btn" onclick="saveEdit(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">💾</button><button onclick="cancelEdit()">❌</button>' : '<button class="edit-btn" onclick="startEdit(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">✏️</button><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">🗑️</button>';
                 
                 html += '<tr class="' + rowClass + '">';
-                html += '<tr>' + (i+1) + '</td>';
+                html += '<td>' + (i+1) + '</td>';
                 html += '<td><strong>' + (r.symbol || '') + (isEdited?' ✏️':'') + (hasTrade?' 💰':'') + breakBadge + '</strong></td>';
                 html += '<td>' + (r.analysis_date||'') + '</td>';
                 html += '<td>' + ((r.current_price||0).toFixed(2)) + '</td>';
@@ -1021,7 +1018,7 @@ async def dashboard():
                 html += '<td>' + ((r.ppo_confidence||0).toFixed(0)) + '%</td>';
                 html += '<td>' + ((r.agentic_score||0).toFixed(1)) + '</td>';
                 html += '<td>' + (r.diff!==undefined?(r.diff>0?'+':'')+r.diff.toFixed(2):'-') + '</td>';
-                html += '<td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '<td>';
+                html += '<td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '</td>';
                 html += '<td>' + entryCell + '</td>';
                 html += '<td>' + slCell + '</td>';
                 html += '<td>' + tpCell + '</td>';
@@ -1076,7 +1073,7 @@ async def dashboard():
             
             const keys = Object.keys(currentData[0]).filter(k => !['_id', 'saved_at', 'analysis_date', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at'].includes(k));
             
-            let html = '<tr><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>' + keys.map(k => '<th>' + k + '</th>').join('') + '<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
+            let html = '<table><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>' + keys.map(k => '<th>' + k + '</th>').join('') + '<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
@@ -1098,7 +1095,7 @@ async def dashboard():
                     if (typeof val === 'number') val = val.toFixed(2);
                     html += '<td>' + val + '</td>';
                 }
-                html += '<td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '<tr>';
+                html += '<td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '</td>';
                 html += '<td>' + (r.stop_loss?r.stop_loss.toFixed(2):'-') + '</td>';
                 html += '<td>' + (r.target_price?r.target_price.toFixed(2):'-') + '</td>';
                 html += '<td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td>';
