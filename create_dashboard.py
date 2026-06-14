@@ -13,6 +13,7 @@ create_dashboard.py
 ✅ Default Sort: diff ASC, gape DESC
 ✅ LTP Data Available Even When Market Closed
 ✅ LTP Parser Matches Exact DSE Table Structure (td index 2, class shares-table)
+✅ SSL Verification Disabled for DSE
 """
 
 import os
@@ -26,6 +27,10 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta, timezone
 import re
 import time
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
@@ -66,6 +71,7 @@ def is_dse_market_open():
     
     try:
         session = requests.Session()
+        session.verify = False  # SSL verification disabled for DSE
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -78,7 +84,7 @@ def is_dse_market_open():
 
         # Method 1: DSE হোমপেজ স্ক্র্যাপিং
         try:
-            response = session.get('https://www.dsebd.org/', timeout=10)
+            response = session.get('https://www.dsebd.org/', timeout=10, verify=False)
             
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -135,7 +141,8 @@ def is_dse_market_open():
                     'X-Requested-With': 'XMLHttpRequest',
                     'Referer': 'https://www.dsebd.org/'
                 },
-                timeout=15
+                timeout=15,
+                verify=False
             )
             
             if ajax_response.status_code == 200:
@@ -185,7 +192,8 @@ def is_dse_market_open():
         try:
             mobile_response = session.get(
                 'https://www.dsebd.org/mobile.php',
-                timeout=10
+                timeout=10,
+                verify=False
             )
             
             if mobile_response.status_code == 200:
@@ -205,7 +213,8 @@ def is_dse_market_open():
         try:
             market_summary = session.get(
                 'https://www.dsebd.org/market_summary.php',
-                timeout=10
+                timeout=10,
+                verify=False
             )
             
             if market_summary.status_code == 200:
@@ -326,118 +335,77 @@ ltp_cache = {"data": {}, "timestamp": None}
 
 def parse_dse_table(html_text):
     """
-    DSE টেবিল থেকে LTP বের করার অতি-সরল পদ্ধতি:
+    DSE টেবিল থেকে LTP বের করার সঠিক পদ্ধতি:
     
     টেবিল স্ট্রাকচার:
-    <table class="shares-table">
-      <tbody>
-        <tr>  <!-- Header: th -->
-          <th>#</th> <th>TRADING CODE</th> <th>LTP*</th> ...
-        </tr>
-        <tr>  <!-- Data: td -->
-          <td>1</td>
-          <td><a href="...">AAMRANET</a></td>
-          <td>19.1</td>  ← LTP (3rd td, index 2)
-          <td>19.5</td>
-          ...
-        </tr>
-      </tbody>
-    </table>
+    table > tbody > tr
+        td[0] = # (সিরিয়াল)
+        td[1] = TRADING CODE (<a> ট্যাগে symbol)
+        td[2] = LTP*
+        td[3] = HIGH
+        td[4] = LOW
+        ...
     
-    LTP পেতে:
-    1. tbody > tr খুঁজি
-    2. header row (th) skip করি
-    3. td[1] থেকে symbol (a tag)
-    4. td[2] থেকে LTP (টেক্সট)
+    LTP: td[2] (3rd td, 0-based index 2)
+    Symbol: td[1] (2nd td, 0-based index 1)
     """
     
     soup = BeautifulSoup(html_text, 'html.parser')
     ltp_data = {}
     
-    # সরাসরি tbody খুঁজি
+    # সরাসরি tbody খুঁজে বের করি
     tbodies = soup.find_all('tbody')
-    
-    print(f"[PARSER] Found {len(tbodies)} tbody elements")
     
     for tbody in tbodies:
         rows = tbody.find_all('tr')
-        print(f"[PARSER] tbody has {len(rows)} rows")
         
-        for row_idx, row in enumerate(rows):
-            # Skip header row
-            th_cells = row.find_all('th')
-            if th_cells:
-                print(f"[PARSER] Row {row_idx}: HEADER (skip)")
+        for row in rows:
+            cells = row.find_all('td')
+            
+            # Header row skip
+            if len(cells) < 3:
                 continue
             
-            # Get all td cells
-            td_cells = row.find_all('td')
-            print(f"[PARSER] Row {row_idx}: {len(td_cells)} td cells")
-            
-            if len(td_cells) < 3:
-                print(f"[PARSER] Row {row_idx}: Not enough cells (need 3, got {len(td_cells)})")
-                continue
-            
-            # Symbol: td[1] -> find <a> tag
+            # 🔑 SYMBOL: td[1] থেকে <a> ট্যাগ
             symbol = None
             try:
-                a_tag = td_cells[1].find('a')
+                a_tag = cells[1].find('a')
                 if a_tag:
                     symbol = a_tag.get_text(strip=True)
-                    print(f"[PARSER] Row {row_idx}: Symbol from <a> = '{symbol}'")
                 else:
-                    symbol = td_cells[1].get_text(strip=True)
-                    print(f"[PARSER] Row {row_idx}: Symbol from text = '{symbol}'")
-            except Exception as e:
-                print(f"[PARSER] Row {row_idx}: Symbol error: {e}")
+                    symbol = cells[1].get_text(strip=True)
+            except:
                 continue
             
-            if not symbol or len(symbol.strip()) < 2:
-                print(f"[PARSER] Row {row_idx}: Invalid symbol: '{symbol}'")
+            if not symbol or len(symbol) < 2:
                 continue
             
-            # LTP: td[2] -> direct text
+            # 🔑 LTP: td[2] থেকে (3rd td)
             ltp = None
             try:
-                ltp_text = td_cells[2].get_text(strip=True)
-                print(f"[PARSER] Row {row_idx}: LTP text = '{ltp_text}'")
-                
-                # কমা রিমুভ করুন (যেমন: "1,439.2")
+                ltp_text = cells[2].get_text(strip=True)
                 ltp_text = ltp_text.replace(',', '')
-                
-                # ফ্লোটে কনভার্ট
                 ltp = float(ltp_text)
                 
-                # ভ্যালিডেশন
-                if ltp > 0 and ltp < 50000:
-                    print(f"[PARSER] Row {row_idx}: Valid LTP = {ltp}")
-                else:
-                    print(f"[PARSER] Row {row_idx}: LTP out of range: {ltp}")
+                if ltp <= 0 or ltp > 50000:
                     ltp = None
-            except Exception as e:
-                print(f"[PARSER] Row {row_idx}: LTP error: {e}")
-                continue
+            except:
+                pass
             
             if symbol and ltp:
-                clean_symbol = symbol.upper().strip()
-                ltp_data[clean_symbol] = ltp
-                print(f"[PARSER] ✅ Added: {clean_symbol} = {ltp}")
+                ltp_data[symbol.upper().strip()] = ltp
         
-        # যদি ডাটা পাই, তাহলে প্রথম tbody থেকেই রিটার্ন
         if len(ltp_data) > 10:
             break
     
-    print(f"[PARSER] Total symbols found: {len(ltp_data)}")
-    
-    if len(ltp_data) == 0:
-        print("[PARSER] ❌ No data found! Debugging...")
-        # ডিবাগ: HTML এর প্রথম 2000 characters
-        print(f"[PARSER] HTML preview: {html_text[:2000]}")
-        # ডিবাগ: table আছে কিনা
-        tables = soup.find_all('table')
-        print(f"[PARSER] Total tables in HTML: {len(tables)}")
+    print(f"📊 LTP Data Found: {len(ltp_data)} symbols")
+    if len(ltp_data) > 0:
+        # প্রথম 3টা দেখাই ডিবাগের জন্য
+        sample = list(ltp_data.items())[:3]
+        print(f"📊 Sample: {sample}")
     
     return ltp_data
+
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
     """DSE থেকে LTP ডাটা ফেচ করুন - মার্কেট বন্ধ থাকলেও ডাটা ফেচ করবে"""
@@ -455,6 +423,7 @@ async def get_dse_ltp():
                 return ltp_cache["data"]
 
     session = requests.Session()
+    session.verify = False  # SSL verification disabled for DSE
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -470,7 +439,7 @@ async def get_dse_ltp():
     # Method 1: সরাসরি dseX_share.php থেকে ডাটা ফেচ
     try:
         print("[LTP] Fetching from dseX_share.php...")
-        resp = session.get('https://dsebd.org/dseX_share.php', timeout=15)
+        resp = session.get('https://dsebd.org/dseX_share.php', timeout=15, verify=False)
         if resp.status_code == 200:
             ltp_data = parse_dse_table(resp.text)
             if ltp_data:
@@ -486,7 +455,8 @@ async def get_dse_ltp():
                 resp = session.get(
                     f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}',
                     headers={'X-Requested-With': 'XMLHttpRequest'},
-                    timeout=10
+                    timeout=10,
+                    verify=False
                 )
                 if resp.status_code == 200:
                     page_data = parse_dse_table(resp.text)
@@ -505,7 +475,7 @@ async def get_dse_ltp():
     # Method 3: latest_share_price_scroll_by_ltp.php
     if not data_fetched:
         try:
-            resp = session.get('https://www.dsebd.org/latest_share_price_scroll_by_ltp.php', timeout=15)
+            resp = session.get('https://www.dsebd.org/latest_share_price_scroll_by_ltp.php', timeout=15, verify=False)
             if resp.status_code == 200:
                 ltp_data = parse_dse_table(resp.text)
                 if ltp_data:
@@ -517,7 +487,7 @@ async def get_dse_ltp():
     # Method 4: Mobile API
     if not data_fetched:
         try:
-            resp = session.get('https://www.dsebd.org/mobile.php', timeout=10)
+            resp = session.get('https://www.dsebd.org/mobile.php', timeout=10, verify=False)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 for table in soup.find_all('table'):
