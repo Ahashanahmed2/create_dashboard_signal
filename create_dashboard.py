@@ -13,6 +13,7 @@ create_dashboard.py
 ✅ Default Sort: diff ASC, gape DESC
 ✅ LTP Data Available Even When Market Closed
 ✅ Tabs working fixed
+✅ Data rendering fixed for missing fields
 """
 
 import os
@@ -25,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pymongo import MongoClient
 from datetime import datetime, timedelta, timezone
 import re
-import time
+import traceback
 
 MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
@@ -36,12 +37,15 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 def get_mongo_collection(collection_name=None):
-    if not MONGODB_URI: return None
+    if not MONGODB_URI: 
+        return None
     try:
         client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
         db = client[DATABASE_NAME]
         return db[collection_name or COLLECTION_NAME]
-    except: return None
+    except Exception as e:
+        print(f"MongoDB connection error: {e}")
+        return None
 
 # ================================
 # Bangladesh Timezone Helper
@@ -101,8 +105,15 @@ async def service_worker():
 
 @app.get("/api/health")
 async def health():
-    col = get_mongo_collection()
-    return {"status": "ok", "mongodb": "connected" if col else "not configured"}
+    try:
+        col = get_mongo_collection()
+        if col is None:
+            return {"status": "error", "mongodb": "not configured"}
+        # Check connection
+        col.database.command('ping')
+        return {"status": "ok", "mongodb": "connected"}
+    except Exception as e:
+        return {"status": "error", "mongodb": f"error: {str(e)}"}
 
 @app.get("/api/market-status")
 async def market_status():
@@ -192,7 +203,7 @@ async def get_dse_ltp(force: int = Query(None)):
     except Exception as e:
         print(f"[LTP] DSEX method failed: {e}")
 
-    # FALLBACK 1: AJAX Scroller
+    # FALLBACKS
     if not data_fetched:
         try:
             print("[LTP] Trying AJAX scroller...")
@@ -243,7 +254,6 @@ async def get_dse_ltp(force: int = Query(None)):
         except Exception as e:
             print(f"[LTP] AJAX failed: {e}")
 
-    # FALLBACK 2: Mobile API
     if not data_fetched:
         try:
             print("[LTP] Trying mobile API...")
@@ -281,7 +291,6 @@ async def get_dse_ltp(force: int = Query(None)):
         except Exception as e:
             print(f"[LTP] Mobile failed: {e}")
 
-    # Cache fallback
     if ltp_cache["data"] and ltp_cache["data"].get("ltp_data"):
         print(f"[LTP] ⚠️ Using cached data")
         cached = ltp_cache["data"].copy()
@@ -350,7 +359,8 @@ async def get_signals(
     sort_order: str = Query("asc")
 ):
     collection = get_mongo_collection()
-    if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if collection is None: 
+        return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     query = {}
     if date: 
         query = build_date_query(date)
@@ -572,6 +582,9 @@ async def dashboard():
         .modal-content { background: #1a1a2e; padding: 25px; border-radius: 15px; max-width: 500px; width: 90%; }
         .trade-summary { background: #0f3460; padding: 15px; border-radius: 10px; margin: 15px 0; }
         @media (max-width: 768px) { .header h1 { font-size: 1.5em; } }
+        .rrr-high { color: #00ff88; font-weight: bold; }
+        .rrr-medium { color: #ffd700; }
+        .rrr-low { color: #ff4757; }
     </style>
 </head>
 <body>
@@ -625,12 +638,15 @@ async def dashboard():
             buy: 'daily_buy_signals' 
         };
 
-        // Initialize tabs on page load
+        // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {
-            // Add click event listeners to all tabs
+            console.log('DOM loaded, initializing...');
+            
+            // Add click event listeners to tabs
             document.querySelectorAll('.tab').forEach(tab => {
                 tab.addEventListener('click', function() {
                     const tabId = this.getAttribute('data-tab');
+                    console.log('Tab clicked:', tabId);
                     if (tabId) {
                         switchTab(tabId);
                     }
@@ -643,13 +659,15 @@ async def dashboard():
             checkMarketStatus();
             loadDseLtp();
             loadAlertRules();
+            
+            // Set intervals
             setInterval(checkMarketStatus, 60000);
             setInterval(function(){loadDseLtp(true);}, 30000);
             updateSortStatus();
         });
 
         function switchTab(tabId) {
-            // Update current tab
+            console.log('Switching to tab:', tabId);
             currentTab = tabId;
             
             // Update active class on tabs
@@ -664,7 +682,7 @@ async def dashboard():
             // Reset search input
             document.getElementById('symbolSearch').value = '';
             
-            // Reset sort (optional)
+            // Reset sort
             resetSort();
             
             // Load dates for the new collection
@@ -752,12 +770,17 @@ async def dashboard():
         }
 
         async function loadDates(c) { 
-            const r = await fetch('/api/dates?collection=' + c); 
-            const d = await r.json(); 
-            const s = document.getElementById('dateSelect'); 
-            s.innerHTML = '<option value="">Latest</option>'; 
-            if (Array.isArray(d)) {
-                d.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); }); 
+            try {
+                const r = await fetch('/api/dates?collection=' + c); 
+                const d = await r.json(); 
+                const s = document.getElementById('dateSelect'); 
+                s.innerHTML = '<option value="">Latest</option>'; 
+                if (Array.isArray(d)) {
+                    d.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); }); 
+                }
+                console.log('Dates loaded for', c, ':', d.length);
+            } catch(e) {
+                console.error('Error loading dates:', e);
             }
         }
 
@@ -769,26 +792,37 @@ async def dashboard():
                 sortParam = '&sort_by=' + currentSort.field + '&sort_order=' + currentSort.order;
             }
             
-            if (currentTab === 'ai_signals') {
-                let url = '/api/signals?date=' + date + '&limit=1000' + sortParam;
-                if (symbol) url += '&symbol=' + symbol;
-                const r = await fetch(url); const j = await r.json();
-                currentData = j.data || [];
-            } else if (currentTab === 'swrsi') {
-                let url = '/api/swrsi?' + sortParam;
-                if (date) url += '&date=' + date;
-                if (symbol) url += '&symbol=' + symbol;
-                const r = await fetch(url); const j = await r.json();
-                currentData = j.signals || [];
-            } else {
-                const map = { support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
-                let url = '/api/generic-data?collection=' + map[currentTab] + '&limit=500' + sortParam;
-                if (date) url += '&date=' + date;
-                if (symbol) url += '&symbol=' + symbol;
-                const r = await fetch(url); const j = await r.json();
-                currentData = j.data || [];
+            console.log('Loading tab:', currentTab, 'date:', date, 'symbol:', symbol);
+            
+            try {
+                if (currentTab === 'ai_signals') {
+                    let url = '/api/signals?date=' + date + '&limit=1000' + sortParam;
+                    if (symbol) url += '&symbol=' + symbol;
+                    const r = await fetch(url); 
+                    const j = await r.json();
+                    currentData = j.data || [];
+                    console.log('AI Signals loaded:', currentData.length, 'records');
+                } else if (currentTab === 'swrsi') {
+                    let url = '/api/swrsi?' + sortParam;
+                    if (date) url += '&date=' + date;
+                    if (symbol) url += '&symbol=' + symbol;
+                    const r = await fetch(url); const j = await r.json();
+                    currentData = j.signals || [];
+                    console.log('SWRSI loaded:', currentData.length, 'records');
+                } else {
+                    const map = { support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+                    let url = '/api/generic-data?collection=' + map[currentTab] + '&limit=500' + sortParam;
+                    if (date) url += '&date=' + date;
+                    if (symbol) url += '&symbol=' + symbol;
+                    const r = await fetch(url); const j = await r.json();
+                    currentData = j.data || [];
+                    console.log(currentTab, 'loaded:', currentData.length, 'records');
+                }
+                renderCurrentTab();
+            } catch(e) {
+                console.error('Error loading data:', e);
+                document.getElementById('dynamicTable').innerHTML = '<p style="text-align:center;padding:40px;">Error loading data: ' + e.message + '</p>';
             }
-            renderCurrentTab();
         }
 
         function renderCurrentTab() {
@@ -799,7 +833,7 @@ async def dashboard():
 
         function getSignalClass(s) {
             if (!s) return '';
-            if (s.includes('STRONG BUY')) return 'signal-SB';
+            if (s.includes('STRONG BUY') || s.includes('✅ BUY')) return 'signal-SB';
             if (s.includes('BUY')) return 'signal-B';
             if (s.includes('HOLD')) return 'signal-H';
             if (s.includes('SELL')) return 'signal-S';
@@ -829,7 +863,7 @@ async def dashboard():
         }
 
         function getRRRClass(rrr) {
-            if (!rrr) return '';
+            if (!rrr || rrr === 0) return '';
             if (rrr >= 2) return 'rrr-high';
             if (rrr >= 1) return 'rrr-medium';
             return 'rrr-low';
@@ -998,9 +1032,29 @@ async def dashboard():
 
         function renderAITable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p style="text-align:center;padding:40px;">No data</p>'; return; }
+            if (!currentData || currentData.length === 0) { 
+                div.innerHTML = '<p style="text-align:center;padding:40px;">No data available for selected date</p>'; 
+                document.getElementById('recordCount').textContent = '(0 signals)';
+                return; 
+            }
             
-            let html = '<table><thead><tr><th>#</th><th onclick="handleSort(\'symbol\')">Symbol' + getSortIndicator('symbol') + '</th><th>Date</th><th>Price</th><th>LTP</th><th>Sector</th><th>Signal</th><th>Score</th><th>LLM</th><th>LLM%</th><th>XGB</th><th>XGB%</th><th>PPO</th><th>PPO%</th><th>Agentic</th><th onclick="handleSort(\'diff\')">Diff' + getSortIndicator('diff') + '</th><th onclick="handleSort(\'gape\')">Gape' + getSortIndicator('gape') + '</th><th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
+            let html = '<table><thead><tr>';
+            html += '<th>#</th>';
+            html += '<th onclick="handleSort(\'symbol\')">Symbol' + getSortIndicator('symbol') + '</th>';
+            html += '<th>Date</th>';
+            html += '<th>Price</th>';
+            html += '<th>LTP</th>';
+            html += '<th>Sector</th>';
+            html += '<th onclick="handleSort(\'final_signal\')">Signal' + getSortIndicator('final_signal') + '</th>';
+            html += '<th onclick="handleSort(\'final_combined_score\')">Score' + getSortIndicator('final_combined_score') + '</th>';
+            html += '<th>LLM</th><th>LLM%</th>';
+            html += '<th>XGB</th><th>XGB%</th>';
+            html += '<th>PPO</th><th>PPO%</th>';
+            html += '<th>Agentic</th>';
+            html += '<th onclick="handleSort(\'diff\')">Diff' + getSortIndicator('diff') + '</th>';
+            html += '<th onclick="handleSort(\'gape\')">Gape' + getSortIndicator('gape') + '</th>';
+            html += '<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th>';
+            html += '</tr></thead><tbody>';
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
@@ -1014,12 +1068,36 @@ async def dashboard():
                 const rrr = r.risk_reward_ratio || 0;
                 const rrrClass = getRRRClass(rrr);
                 const breakBadge = isLtpAboveHigh(r.symbol, highPrice) ? ' 🚀' : '';
+                
                 const entryCell = isEditing ? '<input class="editable-input" id="edit-entry-' + safeId + '" value="' + ((r.entry_price||0).toFixed(2)) + '">' : (r.entry_price ? r.entry_price.toFixed(2) : '-');
                 const slCell = isEditing ? '<input class="editable-input" id="edit-sl-' + safeId + '" value="' + ((r.stop_loss||0).toFixed(2)) + '">' : (r.stop_loss ? r.stop_loss.toFixed(2) : '-');
                 const tpCell = isEditing ? '<input class="editable-input" id="edit-tp-' + safeId + '" value="' + ((r.target_price||0).toFixed(2)) + '">' : (r.target_price ? r.target_price.toFixed(2) : '-');
                 const actionCell = isEditing ? '<button class="save-btn" onclick="saveEdit(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">💾</button><button onclick="cancelEdit()">❌</button>' : '<button class="edit-btn" onclick="startEdit(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">✏️</button><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + r.analysis_date + '\')">🗑️</button>';
                 
-                html += '<tr class="' + rowClass + '"><td>' + (i+1) + '</td><td><strong>' + r.symbol + (isEdited?' ✏️':'') + (hasTrade?' 💰':'') + breakBadge + '</strong></td><td>' + (r.analysis_date||'') + '</td><td>' + ((r.current_price||0).toFixed(2)) + '</td><td>' + ltpDisplay + '</td><td>' + (r.sector||'') + '</td><td class="' + getSignalClass(r.final_signal) + '">' + (r.final_signal||'') + '</td><td>' + ((r.final_combined_score||0).toFixed(1)) + '</td><td>' + (r.llm_signal||'') + '</td><td>' + ((r.llm_confidence||0).toFixed(0)) + '%</td><td>' + (r.xgb_signal||'') + '</td><td>' + ((r.xgb_confidence||0).toFixed(0)) + '%</td><td>' + (r.ppo_signal||'') + '</td><td>' + ((r.ppo_confidence||0).toFixed(0)) + '%</td><td>' + ((r.agentic_score||0).toFixed(1)) + '</td><td>' + (r.diff!==undefined?(r.diff>0?'+':'')+r.diff.toFixed(2):'-') + '</td><td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '</td><td>' + entryCell + '</td><td>' + slCell + '</td><td>' + tpCell + '</td><td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td><td>' + actionCell + '</td></tr>';
+                html += '<tr class="' + rowClass + '">';
+                html += '<td>' + (i+1) + '</td>';
+                html += '<td><strong>' + (r.symbol || '') + (isEdited?' ✏️':'') + (hasTrade?' 💰':'') + breakBadge + '</strong></td>';
+                html += '<td>' + (r.analysis_date || '') + '</td>';
+                html += '<td>' + ((r.current_price || 0).toFixed(2)) + '</td>';
+                html += '<td>' + ltpDisplay + '</td>';
+                html += '<td>' + (r.sector || '-') + '</td>';
+                html += '<td class="' + getSignalClass(r.final_signal) + '">' + (r.final_signal || '-') + '</td>';
+                html += '<td>' + ((r.final_combined_score || 0).toFixed(1)) + '</td>';
+                html += '<td>' + (r.llm_signal || '-') + '</td>';
+                html += '<td>' + ((r.llm_confidence || 0).toFixed(0)) + '%</td>';
+                html += '<td>' + (r.xgb_signal || '-') + '</td>';
+                html += '<td>' + ((r.xgb_confidence || 0).toFixed(0)) + '%</td>';
+                html += '<td>' + (r.ppo_signal || '-') + '</td>';
+                html += '<td>' + ((r.ppo_confidence || 0).toFixed(0)) + '%</td>';
+                html += '<td>' + ((r.agentic_score || 0).toFixed(1)) + '</td>';
+                html += '<td>' + (r.diff !== undefined && r.diff !== null ? (r.diff>0?'+':'') + r.diff.toFixed(2) : '0.00') + '</td>';
+                html += '<td>' + (r.gape !== undefined && r.gape !== null ? r.gape.toFixed(2) : '0.00') + '</td>';
+                html += '<td>' + entryCell + '</td>';
+                html += '<td>' + slCell + '</td>';
+                html += '<td>' + tpCell + '</td>';
+                html += '<td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td>';
+                html += '<td>' + actionCell + '</td>';
+                html += '</tr>';
             }
             html += '</tbody></table>';
             div.innerHTML = html;
@@ -1028,9 +1106,14 @@ async def dashboard():
 
         function renderSWRSITable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p style="text-align:center;padding:40px;">No SWRSI signals</p>'; return; }
+            if (!currentData || currentData.length === 0) { 
+                div.innerHTML = '<p style="text-align:center;padding:40px;">No SWRSI signals available</p>'; 
+                return; 
+            }
             
-            let html = '<table><thead><tr><th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Score</th><th>Weekly</th><th>Diff</th><th>Gape</th><th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
+            let html = '<table><thead><tr>';
+            html += '<th>#</th><th>Symbol</th><th>Sector</th><th>LTP</th><th>Score</th><th>Weekly</th><th>Diff</th><th>Gape</th><th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th>';
+            html += '</tr></thead><tbody>';
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
@@ -1042,19 +1125,40 @@ async def dashboard():
                 const rrrClass = getRRRClass(rrr);
                 const breakBadge = isLtpAboveHigh(r.symbol, highPrice) ? '🚀' : '';
                 
-                html += '<tr class="' + rowClass + '"><td>' + (i+1) + '</td><td><strong>' + r.symbol + (hasTrade?' 💰':'') + breakBadge + '</strong></td><td>' + (r.sector||'') + '</td><td>' + ltpDisplay + '</td><td>' + ((r.composite_score||0).toFixed(0)) + '</td><td>' + (r.weekly_strength_label||'') + '</td><td>' + (r.diff!==undefined?(r.diff>0?'+':'')+r.diff.toFixed(2):'-') + '</td><td>' + (r.gape!==undefined?r.gape.toFixed(2):'-') + '</td><td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '</td><td>' + (r.stop_loss?r.stop_loss.toFixed(2):'-') + '</td><td>' + (r.target_price?r.target_price.toFixed(2):'-') + '</td><td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td><td><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + (r.analysis_date||'') + '\',\'swrsi\')">🗑️</button></td></tr>';
+                html += '<tr class="' + rowClass + '">';
+                html += '<td>' + (i+1) + '</td>';
+                html += '<td><strong>' + (r.symbol || '') + (hasTrade?' 💰':'') + breakBadge + '</strong></td>';
+                html += '<td>' + (r.sector || '-') + '</td>';
+                html += '<td>' + ltpDisplay + '</td>';
+                html += '<td>' + ((r.composite_score || 0).toFixed(0)) + '</td>';
+                html += '<td>' + (r.weekly_strength_label || '-') + '</td>';
+                html += '<td>' + (r.diff !== undefined && r.diff !== null ? (r.diff>0?'+':'') + r.diff.toFixed(2) : '0.00') + '</td>';
+                html += '<td>' + (r.gape !== undefined && r.gape !== null ? r.gape.toFixed(2) : '0.00') + '</td>';
+                html += '<td>' + (r.entry_price ? r.entry_price.toFixed(2) : '-') + '</td>';
+                html += '<td>' + (r.stop_loss ? r.stop_loss.toFixed(2) : '-') + '</td>';
+                html += '<td>' + (r.target_price ? r.target_price.toFixed(2) : '-') + '</td>';
+                html += '<td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td>';
+                html += '<td><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + (r.analysis_date||'') + '\',\'swrsi\')">🗑️</button></td>';
+                html += '</tr>';
             }
             html += '</tbody></table>';
             div.innerHTML = html;
+            document.getElementById('recordCount').textContent = '(' + currentData.length + ' records)';
         }
 
         function renderGenericTable() {
             const div = document.getElementById('dynamicTable');
-            if (!currentData.length) { div.innerHTML = '<p style="text-align:center;padding:40px;">No data</p>'; return; }
+            if (!currentData || currentData.length === 0) { 
+                div.innerHTML = '<p style="text-align:center;padding:40px;">No data available</p>'; 
+                return; 
+            }
             
-            const keys = Object.keys(currentData[0]).filter(k => !['_id', 'saved_at', 'analysis_date', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at'].includes(k));
+            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at'];
+            const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k));
             
-            let html = '<table><thead><tr><th>#</th><th>Symbol</th><th>LTP</th>' + keys.map(k => '<th>' + k + '</th>').join('') + '<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th></tr></thead><tbody>';
+            let html = '<table><thead><tr>';
+            html += '<th>#</th><th>Symbol</th><th>LTP</th>' + keys.map(k => '<th>' + k + '</th>').join('') + '<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Act</th>';
+            html += '</tr></thead><tbody>';
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
@@ -1066,14 +1170,22 @@ async def dashboard():
                 const rrrClass = getRRRClass(rrr);
                 const breakBadge = isLtpAboveHigh(r.symbol, highPrice) ? '🚀' : '';
                 
-                html += '<tr class="' + rowClass + '"><td>' + (i+1) + '</td><td><strong>' + r.symbol + (hasTrade?' 💰':'') + breakBadge + '</strong></td><td>' + ltpDisplay + '</td>';
+                html += '<tr class="' + rowClass + '">';
+                html += '<td>' + (i+1) + '</td>';
+                html += '<td><strong>' + (r.symbol || '') + (hasTrade?' 💰':'') + breakBadge + '</strong></td>';
+                html += '<td>' + ltpDisplay + '</td>';
                 for (let k of keys) {
                     let val = r[k];
-                    if (val === undefined || val === null) val = '';
+                    if (val === undefined || val === null) val = '-';
                     if (typeof val === 'number') val = val.toFixed(2);
                     html += '<td>' + val + '</td>';
                 }
-                html += '<td>' + (r.entry_price?r.entry_price.toFixed(2):'-') + '</td><td>' + (r.stop_loss?r.stop_loss.toFixed(2):'-') + '</td><td>' + (r.target_price?r.target_price.toFixed(2):'-') + '</td><td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td><td><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + (r.analysis_date||r.date||'') + '\',\'' + currentTab + '\')">🗑️</button></td></tr>';
+                html += '<td>' + (r.entry_price ? r.entry_price.toFixed(2) : '-') + '</td>';
+                html += '<td>' + (r.stop_loss ? r.stop_loss.toFixed(2) : '-') + '</td>';
+                html += '<td>' + (r.target_price ? r.target_price.toFixed(2) : '-') + '</td>';
+                html += '<td class="' + rrrClass + '"><strong>' + rrr.toFixed(2) + '</strong></td>';
+                html += '<td><button class="trade-edit-btn" onclick="openTradeForSymbol(\'' + r.symbol + '\')">💰</button><button class="delete-btn" onclick="deleteRecord(\'' + r.symbol + '\',\'' + (r.analysis_date||r.date||'') + '\',\'' + currentTab + '\')">🗑️</button></td>';
+                html += '</tr>';
             }
             html += '</tbody></table>';
             div.innerHTML = html;
