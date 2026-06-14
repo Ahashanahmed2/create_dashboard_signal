@@ -326,66 +326,67 @@ ltp_cache = {"data": {}, "timestamp": None}
 
 def parse_dse_table(html_text):
     """
-    Ultra-robust parser for DSE LTP data.
-    Handles whitespace, formatting, and various table structures.
-    Symbol: 2nd td's <a> tag (index 1)
-    LTP: 3rd td (index 2)
+    DSE টেবিল থেকে LTP বের করার সঠিক পদ্ধতি:
+    
+    টেবিল স্ট্রাকচার:
+    table > tbody > tr
+        td[0] = # (সিরিয়াল)
+        td[1] = TRADING CODE (<a> ট্যাগে symbol)
+        td[2] = LTP*
+        td[3] = HIGH
+        td[4] = LOW
+        ...
+    
+    কিন্তু আপনি বলেছেন LTP td[3] তে আছে!
+    তার মানে:
+        td[0] = #
+        td[1] = TRADING CODE (symbol)
+        td[2] = LTP*
+        td[3] = HIGH
+        td[4] = LOW
+        ...
+    
+    LTP: td[2] (3rd td, 0-based index 2)
+    Symbol: td[1] (2nd td, 0-based index 1)
     """
+    
     soup = BeautifulSoup(html_text, 'html.parser')
     ltp_data = {}
-
-    # Find all tables
-    all_tables = soup.find_all('table')
     
-    for table in all_tables:
-        # Get all rows (both tr with th and tr with td)
-        rows = table.find_all('tr')
+    # সরাসরি tbody খুঁজে বের করি
+    tbodies = soup.find_all('tbody')
+    
+    for tbody in tbodies:
+        rows = tbody.find_all('tr')
         
         for row in rows:
-            # Get all cells (both th and td)
-            cells = row.find_all(['td', 'th'])
+            cells = row.find_all('td')
             
-            # Skip header rows or rows without enough cells
+            # Header row skip
             if len(cells) < 3:
                 continue
             
-            # Check if this is a header row
-            if row.find('th'):
-                continue
-            
-            # Symbol: always in the 2nd cell (index 1)
+            # 🔑 SYMBOL: td[1] থেকে <a> ট্যাগ
             symbol = None
             try:
-                symbol_cell = cells[1]
-                # Find <a> tag first
-                a_tag = symbol_cell.find('a')
+                a_tag = cells[1].find('a')
                 if a_tag:
                     symbol = a_tag.get_text(strip=True)
                 else:
-                    # If no <a> tag, get direct text
-                    symbol = symbol_cell.get_text(strip=True)
-                
-                # Clean symbol - remove extra whitespace
-                if symbol:
-                    symbol = ' '.join(symbol.split())
+                    symbol = cells[1].get_text(strip=True)
             except:
                 continue
             
             if not symbol or len(symbol) < 2:
                 continue
             
-            # LTP: always in the 3rd cell (index 2)
+            # 🔑 LTP: td[2] থেকে (3rd td)
             ltp = None
             try:
-                ltp_cell = cells[2]
-                ltp_text = ltp_cell.get_text(strip=True)
-                # Remove commas for numbers like 1,439.2
+                ltp_text = cells[2].get_text(strip=True)
                 ltp_text = ltp_text.replace(',', '')
-                
-                # Try to convert to float
                 ltp = float(ltp_text)
                 
-                # Validate LTP
                 if ltp <= 0 or ltp > 50000:
                     ltp = None
             except:
@@ -394,12 +395,16 @@ def parse_dse_table(html_text):
             if symbol and ltp:
                 ltp_data[symbol.upper().strip()] = ltp
         
-        # If we found data in this table, stop looking
         if len(ltp_data) > 10:
             break
     
+    print(f"📊 LTP Data Found: {len(ltp_data)} symbols")
+    if len(ltp_data) > 0:
+        # প্রথম 3টা দেখাই ডিবাগের জন্য
+        sample = list(ltp_data.items())[:3]
+        print(f"📊 Sample: {sample}")
+    
     return ltp_data
-
 
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
