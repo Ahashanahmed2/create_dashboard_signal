@@ -12,6 +12,7 @@ create_dashboard.py
 ✅ LTP > High Breakout Row Highlight (GREEN)
 ✅ Default Sort: diff ASC, gape DESC
 ✅ LTP Data Available Even When Market Closed
+✅ LTP updates every 30 seconds during market hours
 """
 
 import os
@@ -324,21 +325,24 @@ async def market_status():
 ltp_cache = {"data": {}, "timestamp": None}
 
 @app.get("/api/dse-ltp")
-async def get_dse_ltp():
+async def get_dse_ltp(force: int = Query(None)):
     """DSE থেকে LTP ডাটা ফেচ করুন - মার্কেট বন্ধ থাকলেও ডাটা ফেচ করবে"""
 
     market_is_open = is_dse_market_open()
+    force_refresh = force is not None
 
-    # ক্যাশ চেক
-    if ltp_cache["timestamp"]:
+    # ক্যাশ চেক - force_refresh থাকলে ক্যাশ বাইপাস
+    if not force_refresh and ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
-        # মার্কেট খোলা থাকলে ২ মিনিটের ক্যাশ ব্যবহার করবে
+        # মার্কেট খোলা থাকলে ৩০ সেকেন্ডের ক্যাশ (আগে ছিল ১২০ সেকেন্ড)
         if market_is_open:
-            if age < 120 and ltp_cache["data"]:
+            if age < 30 and ltp_cache["data"]:
+                print(f"[LTP] Using cache ({age:.0f}s old)")
                 return ltp_cache["data"]
         # মার্কেট বন্ধ থাকলে ৫ মিনিটের ক্যাশ
         else:
             if age < 300 and ltp_cache["data"]:
+                print(f"[LTP] Using cache ({age:.0f}s old) - market closed")
                 return ltp_cache["data"]
 
     ltp_data = {}
@@ -359,7 +363,7 @@ async def get_dse_ltp():
         for page in range(1, 6):  # 5 পেজ পর্যন্ত চেষ্টা
             try:
                 response = session.get(
-                    f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}',
+                    f'https://www.dsebd.org/latest_share_price_scroll_l.php?page={page}&_={int(time.time())}',
                     headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.dsebd.org/'},
                     timeout=10
                 )
@@ -1006,6 +1010,10 @@ async def dashboard():
         let alertRules = [];
         let currentTradeSymbol = null;
         
+        // LTP update timer
+        let ltpUpdateInterval = null;
+        let isMarketOpen = false;
+        
         // Sorting state
         let currentSort = { field: null, order: null };
         let defaultSort = { diff: 'asc', gape: 'desc' };
@@ -1024,8 +1032,19 @@ async def dashboard():
         loadDseLtp();
         loadAlertRules();
         setInterval(checkMarketStatus, 60000);
-        setInterval(loadDseLtp, 60000);
+        
+        // Start LTP update interval (30 seconds when market open, 5 minutes when closed)
+        startLtpUpdateInterval();
+        
         updateSortStatus();
+
+        function startLtpUpdateInterval() {
+            if (ltpUpdateInterval) clearInterval(ltpUpdateInterval);
+            // Update every 30 seconds
+            ltpUpdateInterval = setInterval(function() { 
+                loadDseLtp(true); 
+            }, 30000);
+        }
 
         function loadAlertRules() {
             const saved = localStorage.getItem('ltpAlertRules_v30');
@@ -1092,20 +1111,29 @@ async def dashboard():
         async function checkMarketStatus() {
             const res = await fetch('/api/market-status');
             const s = await res.json();
+            isMarketOpen = s.is_open;
             document.getElementById('marketStatus').innerHTML = s.is_open 
                 ? `🟢 DSE MARKET OPEN | ${s.bangladesh_time || ''}`
                 : `🔴 DSE CLOSED | Opens ${s.next_open || 'next session'} | ${s.bangladesh_time || ''}`;
             document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
         }
 
-        async function loadDseLtp() {
+        async function loadDseLtp(forceRefresh = false) {
             try { 
-                const r = await fetch('/api/dse-ltp'); 
+                let url = '/api/dse-ltp';
+                if (forceRefresh) {
+                    url += '?force=' + Date.now();
+                }
+                const r = await fetch(url); 
                 const j = await r.json();
                 if (j.ltp_data && Object.keys(j.ltp_data).length > 0) {
                     dseLtpData = j.ltp_data;
+                    console.log('LTP Updated:', Object.keys(dseLtpData).length, 'symbols, source:', j.source);
+                    renderCurrentTab();
+                } else if (j.status === 'cached' && dseLtpData && Object.keys(dseLtpData).length > 0) {
+                    console.log('LTP using cached data');
+                    renderCurrentTab();
                 }
-                renderCurrentTab();
             } catch(e) {
                 console.error('LTP fetch error:', e.message);
             }
@@ -1681,7 +1709,7 @@ async def dashboard():
             
             html += `<th>Entry</th><th>SL</th><th>TP</th><th>RRR</th><th>Exposure</th><th>Risk%</th>
                 <th>Act</th>
-            <tr></thead><tbody>`;
+            </tr></thead><tbody>`;
             
             for (let i = 0; i < currentData.length; i++) {
                 const r = currentData[i];
