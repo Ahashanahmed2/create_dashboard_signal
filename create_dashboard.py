@@ -14,6 +14,7 @@ create_dashboard.py
 ✅ LTP Data Available Even When Market Closed
 ✅ LTP Parser Matches Exact DSE Table Structure (td index 2, class shares-table)
 ✅ SSL Verification Disabled for DSE
+✅ Sector from latest record per symbol (MongoDB aggregation)
 """
 
 import os
@@ -39,6 +40,15 @@ COLLECTION_NAME = "daily_ai_signals"
 app = FastAPI(title="AI Trading Signals Dashboard", version="18.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ================================
+# Sector Cache
+# ================================
+sector_cache = {
+    "data": {},
+    "timestamp": None,
+    "expiry_seconds": 300  # 5 minutes
+}
 
 def get_mongo_collection(collection_name=None):
     if not MONGODB_URI: return None
@@ -68,7 +78,7 @@ def is_dse_market_open():
     Method 4: ট্রেডিং ডাটা আছে কিনা চেক
     Method 5: টাইম-বেসড ফলব্যাক
     """
-    
+
     try:
         session = requests.Session()
         session.verify = False  # SSL verification disabled for DSE
@@ -85,14 +95,14 @@ def is_dse_market_open():
         # Method 1: DSE হোমপেজ স্ক্র্যাপিং
         try:
             response = session.get('https://www.dsebd.org/', timeout=10, verify=False)
-            
+
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
-                
+
                 # সমস্ত টেক্সট এলিমেন্ট চেক করুন
                 all_text_elements = soup.find_all(string=True)
                 full_page_text = ' '.join([text.strip() for text in all_text_elements if text.strip()])
-                
+
                 # Market Status খুঁজুন - বিভিন্ন ফরম্যাটে
                 if re.search(r'Market\s+Status\s*:\s*Open', full_page_text, re.IGNORECASE):
                     print("[DSE] ✅ MARKET OPEN (Homepage Status)")
@@ -106,7 +116,7 @@ def is_dse_market_open():
                 if re.search(r'Market\s+is\s+Closed', full_page_text, re.IGNORECASE):
                     print("[DSE] ❌ MARKET CLOSED (Homepage)")
                     return False
-                    
+
                 # নির্দিষ্ট এলিমেন্টে খুঁজুন
                 for tag in ['div', 'span', 'strong', 'b', 'h1', 'h2', 'h3', 'h4', 'p']:
                     elements = soup.find_all(tag)
@@ -118,7 +128,7 @@ def is_dse_market_open():
                         if re.search(r'Market\s+Status\s*:\s*Closed', text, re.IGNORECASE):
                             print(f"[DSE] ❌ MARKET CLOSED (Tag: {tag})")
                             return False
-                
+
                 # CSS ক্লাস দিয়ে খুঁজুন
                 status_elements = soup.find_all(class_=re.compile(r'market|status|trading', re.IGNORECASE))
                 for element in status_elements:
@@ -129,7 +139,7 @@ def is_dse_market_open():
                     if 'CLOSED' in text and ('MARKET' in text or 'TRADING' in text):
                         print(f"[DSE] ❌ MARKET CLOSED (CSS Class)")
                         return False
-                        
+
         except Exception as e:
             print(f"[DSE] Method 1 failed: {e}")
 
@@ -144,16 +154,16 @@ def is_dse_market_open():
                 timeout=15,
                 verify=False
             )
-            
+
             if ajax_response.status_code == 200:
                 soup = BeautifulSoup(ajax_response.text, 'html.parser')
-                
+
                 # টেবিল খুঁজুন
                 tables = soup.find_all('table')
-                
+
                 for table in tables:
                     rows = table.find_all('tr')
-                    
+
                     # ডাটা row গুনুন (যে row-এ td আছে)
                     data_rows = []
                     for row in rows:
@@ -165,14 +175,14 @@ def is_dse_market_open():
                                 symbol_text = tds[1].get_text(strip=True) if len(tds) > 1 else ''
                                 # তৃতীয় কলামে LTP থাকে
                                 ltp_text = tds[2].get_text(strip=True).replace(',', '') if len(tds) > 2 else ''
-                                
+
                                 if symbol_text and ltp_text:
                                     ltp_value = float(ltp_text)
                                     if ltp_value > 0:  # ভ্যালিড LTP
                                         data_rows.append(row)
                             except:
                                 continue
-                    
+
                     if len(data_rows) > 10:  # অন্তত ১০টি স্টকের ডাটা থাকলে মার্কেট ওপেন
                         print(f"[DSE] ✅ MARKET OPEN (LTP Data: {len(data_rows)} stocks)")
                         return True
@@ -180,11 +190,11 @@ def is_dse_market_open():
                         print(f"[DSE] ⚠️ Limited LTP Data: {len(data_rows)} stocks")
                         # অল্প ডাটা থাকলেও মার্কেট ওপেন ধরা হবে
                         return True
-                
+
                 # টেবিলে ডাটা নেই
                 print(f"[DSE] ❌ MARKET CLOSED (No LTP Data)")
                 return False
-                
+
         except Exception as e:
             print(f"[DSE] Method 2 failed: {e}")
 
@@ -195,7 +205,7 @@ def is_dse_market_open():
                 timeout=10,
                 verify=False
             )
-            
+
             if mobile_response.status_code == 200:
                 # মোবাইল ভার্সনে ট্রেডিং ডাটা চেক
                 if '<table' in mobile_response.text and '<td' in mobile_response.text:
@@ -216,16 +226,16 @@ def is_dse_market_open():
                 timeout=10,
                 verify=False
             )
-            
+
             if market_summary.status_code == 200:
                 soup = BeautifulSoup(market_summary.text, 'html.parser')
-                
+
                 # ট্রেড ভলিউম বা টার্নওভার চেক
                 all_text = soup.get_text()
-                
+
                 # আজকের ডেট চেক
                 today = get_bd_time().strftime('%Y-%m-%d')
-                
+
                 if 'Turnover' in all_text or 'Volume' in all_text:
                     # ট্রেডিং এক্টিভিটি আছে
                     numbers = re.findall(r'[\d,]+\.?\d*', all_text)
@@ -252,27 +262,91 @@ def _is_dse_market_open_by_time():
     """ফলব্যাক: সময় এবং দিন অনুযায়ী মার্কেট স্ট্যাটাস"""
     now = get_bd_time()
     hour, minute, weekday = now.hour, now.minute, now.weekday()
-    
+
     # সাপ্তাহিক ছুটি (শুক্রবার = 4, শনিবার = 5)
     if weekday in [4, 5]:
         print(f"[DSE] ❌ MARKET CLOSED (Weekend: day {weekday})")
         return False
-    
+
     # ট্রেডিং আওয়ার (রবি-বৃহস্পতি, সকাল ১০:০০ - দুপুর ২:২০)
     if weekday in [6, 0, 1, 2, 3]:
         current_time = hour * 60 + minute
         market_open_time = 10 * 60  # 10:00 AM
         market_close_time = 14 * 60 + 20  # 2:20 PM
-        
+
         if market_open_time <= current_time <= market_close_time:
             print(f"[DSE] ✅ MARKET OPEN (Time: {hour:02d}:{minute:02d})")
             return True
         else:
             print(f"[DSE] ❌ MARKET CLOSED (Time: {hour:02d}:{minute:02d}, outside trading hours)")
             return False
-    
+
     print(f"[DSE] ❌ MARKET CLOSED (Unknown day: {weekday})")
     return False
+
+# ================================
+# Sector Helper Functions
+# ================================
+async def get_latest_sectors_for_symbols(symbols):
+    """
+    প্রতিটি সিম্বলের সর্বশেষ sector বের করুন
+    MongoDB aggregation ব্যবহার করে
+    """
+    if not symbols:
+        return {}
+    
+    # ক্যাশ চেক
+    current_time = get_bd_time()
+    if (sector_cache["timestamp"] and 
+        (current_time - sector_cache["timestamp"]).total_seconds() < sector_cache["expiry_seconds"] and
+        sector_cache["data"]):
+        
+        # শুধু প্রয়োজনীয় সিম্বল ফিল্টার করুন
+        filtered_cache = {k: v for k, v in sector_cache["data"].items() if k in symbols}
+        if filtered_cache:
+            return filtered_cache
+    
+    col = get_mongo_collection("daily_ai_signals")
+    if col is None:
+        return {}
+    
+    try:
+        # Aggregation pipeline ব্যবহার করে প্রতিটি সিম্বলের latest sector বের করুন
+        pipeline = [
+            {"$match": {"symbol": {"$in": symbols}}},
+            {"$sort": {"analysis_date": -1}},
+            {"$group": {
+                "_id": "$symbol",
+                "latest_sector": {"$first": "$sector"},
+                "latest_date": {"$first": "$analysis_date"}
+            }},
+            {"$match": {"latest_sector": {"$ne": None, "$ne": ""}}}
+        ]
+        
+        results = list(col.aggregate(pipeline))
+        
+        sector_map = {}
+        for doc in results:
+            sector_map[doc["_id"]] = doc["latest_sector"]
+        
+        # ক্যাশ আপডেট করুন
+        if sector_map:
+            sector_cache["data"].update(sector_map)
+            sector_cache["timestamp"] = current_time
+        
+        return sector_map
+    
+    except Exception as e:
+        print(f"[SECTOR] Error fetching sectors: {e}")
+        return {}
+
+async def get_latest_sector_for_symbol(symbol):
+    """একটি সিম্বলের সর্বশেষ sector বের করুন"""
+    if not symbol:
+        return None
+    
+    sector_map = await get_latest_sectors_for_symbols([symbol])
+    return sector_map.get(symbol)
 
 # ================================
 # API Routes
@@ -304,7 +378,7 @@ async def test_ltp():
     """LTP fetching টেস্ট করার জন্য আলাদা endpoint"""
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
+
     session = requests.Session()
     session.verify = False
     session.headers.update({
@@ -312,12 +386,12 @@ async def test_ltp():
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
     })
-    
+
     result = {
         "steps": [],
         "final_data": {}
     }
-    
+
     # Step 1: Try dseX_share.php
     try:
         resp = session.get('https://dsebd.org/dseX_share.php', timeout=15, verify=False)
@@ -329,19 +403,19 @@ async def test_ltp():
             "has_tbody": '<tbody>' in resp.text,
             "preview": resp.text[:500]
         })
-        
+
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            
+
             # Check tables
             tables = soup.find_all('table', class_='shares-table')
             result["steps"][-1]["shares_tables_found"] = len(tables)
-            
+
             if tables:
                 for table in tables[:1]:  # First table
                     rows = table.find_all('tr')
                     result["steps"][-1]["total_rows"] = len(rows)
-                    
+
                     sample_rows = []
                     for i, row in enumerate(rows[:5]):  # First 5 rows
                         cells = row.find_all(['td', 'th'])
@@ -352,15 +426,15 @@ async def test_ltp():
                             "texts": cell_texts
                         })
                     result["steps"][-1]["sample_rows"] = sample_rows
-            
+
             # Try parsing
             ltp_data = parse_dse_table(resp.text)
             result["final_data"] = dict(list(ltp_data.items())[:5])
             result["total_ltp"] = len(ltp_data)
-            
+
     except Exception as e:
         result["steps"].append({"url": "dseX_share.php", "error": str(e)})
-    
+
     return result
 
 @app.get("/api/market-status")
@@ -411,23 +485,23 @@ def parse_dse_table(html_text):
       - cells[4]: LOW
       ...
     """
-    
+
     soup = BeautifulSoup(html_text, 'html.parser')
     ltp_data = {}
-    
+
     # shares-table class দিয়ে খুঁজি
     tables = soup.find_all('table', class_='shares-table')
-    
+
     for table in tables:
         rows = table.find_all('tr')
-        
+
         for row in rows:
             cells = row.find_all('td')
-            
+
             # Skip rows without enough td cells (like header)
             if len(cells) < 3:
                 continue
-            
+
             # 🔑 SYMBOL: cells[1] থেকে
             symbol = None
             try:
@@ -440,10 +514,10 @@ def parse_dse_table(html_text):
                     symbol = cells[1].get_text(strip=True)
             except:
                 continue
-            
+
             if not symbol or len(symbol.strip()) < 2:
                 continue
-            
+
             # 🔑 LTP: cells[2] থেকে (3rd column)
             ltp = None
             try:
@@ -451,28 +525,29 @@ def parse_dse_table(html_text):
                 # কমা রিমুভ
                 ltp_text = ltp_text.replace(',', '')
                 ltp = float(ltp_text)
-                
+
                 if ltp <= 0 or ltp > 50000:
                     ltp = None
             except:
                 pass
-            
+
             if symbol and ltp:
                 clean_symbol = symbol.upper().strip()
                 ltp_data[clean_symbol] = ltp
-    
+
     print(f"📊 LTP Data Found: {len(ltp_data)} symbols")
     if len(ltp_data) > 0:
         sample = list(ltp_data.items())[:3]
         print(f"📊 Sample: {sample}")
-    
+
     return ltp_data
+
 @app.get("/api/dse-ltp")
 async def get_dse_ltp():
     """DSE থেকে LTP ডাটা ফেচ করুন - মার্কেট বন্ধ থাকলেও ডাটা ফেচ করবে"""
 
     market_is_open = is_dse_market_open()
-    
+
     # ক্যাশ চেক
     if ltp_cache["timestamp"]:
         age = (get_bd_time() - ltp_cache["timestamp"]).total_seconds()
@@ -529,7 +604,7 @@ async def get_dse_ltp():
             except Exception as e:
                 print(f"[LTP] AJAX page {page} failed: {e}")
                 break
-        
+
         if data_fetched:
             print(f"[LTP] ✅ AJAX API: Found {len(ltp_data)} symbols")
 
@@ -662,6 +737,24 @@ async def get_swrsi_dates():
     dates = col.distinct('analysis_date')
     return sorted(dates, reverse=True)
 
+@app.get("/api/latest-sectors")
+async def get_latest_sectors(symbols: str = Query(None)):
+    """প্রতিটি সিম্বলের সর্বশেষ sector বের করুন"""
+    if symbols:
+        symbol_list = [s.strip() for s in symbols.split(',') if s.strip()]
+        sector_map = await get_latest_sectors_for_symbols(symbol_list)
+        return sector_map
+    else:
+        # সব সিম্বলের sector বের করুন
+        col = get_mongo_collection("daily_ai_signals")
+        if col is None:
+            return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+        
+        # সব সিম্বল বের করুন
+        all_symbols = col.distinct('symbol')
+        sector_map = await get_latest_sectors_for_symbols(all_symbols)
+        return sector_map
+
 @app.get("/api/signals")
 async def get_signals(
     date: str = Query(None), 
@@ -673,7 +766,8 @@ async def get_signals(
     sort_order: str = Query("asc")
 ):
     collection = get_mongo_collection()
-    if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if collection is None: 
+        return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
 
     query = {}
     if date: 
@@ -701,7 +795,26 @@ async def get_signals(
         cursor = cursor.sort(sort_criteria)
     cursor = cursor.limit(limit)
 
-    return {"data": list(cursor)}
+    data = list(cursor)
+    
+    # 🔑 প্রতিটি সিম্বলের জন্য sector আপডেট করুন (latest sector from MongoDB)
+    if data:
+        # সব সিম্বল সংগ্রহ করুন
+        symbols = list(set([doc.get('symbol') for doc in data if doc.get('symbol')]))
+        
+        # লেটেস্ট sectors বের করুন
+        sector_map = await get_latest_sectors_for_symbols(symbols)
+        
+        # প্রতিটি ডকুমেন্টে sector যোগ করুন
+        for doc in data:
+            symbol = doc.get('symbol')
+            if symbol and symbol in sector_map:
+                doc['sector'] = sector_map[symbol]
+            elif symbol:
+                # sector না পেলে ফ্যালব্যাক
+                doc['sector'] = doc.get('sector', 'Other')
+
+    return {"data": data}
 
 @app.get("/api/swrsi")
 async def get_swrsi(
@@ -711,7 +824,8 @@ async def get_swrsi(
     sort_order: str = Query("asc")
 ):
     col = get_mongo_collection("swrsi_signals")
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if col is None: 
+        return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
 
     query = {}
     if date:
@@ -737,13 +851,27 @@ async def get_swrsi(
         cursor = cursor.sort(sort_criteria)
 
     data = list(cursor)
+    
+    # 🔑 সিম্বলগুলোর sector আপডেট করুন (latest sector from MongoDB)
+    if data:
+        symbols = list(set([doc.get('symbol') for doc in data if doc.get('symbol')]))
+        sector_map = await get_latest_sectors_for_symbols(symbols)
+        
+        for doc in data:
+            symbol = doc.get('symbol')
+            if symbol and symbol in sector_map:
+                doc['sector'] = sector_map[symbol]
+            elif symbol:
+                doc['sector'] = doc.get('sector', 'Other')
+    
     all_dates = sorted(col.distinct('analysis_date'), reverse=True)
     return {"signals": data, "total_signals": len(data), "available_dates": all_dates}
 
 @app.get("/api/stats")
 async def get_stats(date: str = Query(None)):
     collection = get_mongo_collection()
-    if collection is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if collection is None: 
+        return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
 
     query = {}
     if date: 
@@ -755,7 +883,8 @@ async def get_stats(date: str = Query(None)):
 
     pipeline = [{'$match': query}, {'$group': {'_id': None, 'total': {'$sum': 1}, 'avg_score': {'$avg': '$final_combined_score'}}}]
     result = list(collection.aggregate(pipeline))
-    if result: return {k: v for k, v in result[0].items() if k != '_id'}
+    if result: 
+        return {k: v for k, v in result[0].items() if k != '_id'}
     return {"total": 0, "avg_score": 0}
 
 @app.get("/api/generic-data")
@@ -768,7 +897,8 @@ async def get_generic_data(
     sort_order: str = Query("asc")
 ):
     col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if col is None: 
+        return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
 
     query = {}
     if date:
@@ -793,13 +923,26 @@ async def get_generic_data(
     if sort_criteria:
         cursor = cursor.sort(sort_criteria)
     data = list(cursor.limit(limit))
+    
+    # 🔑 সিম্বলগুলোর sector আপডেট করুন (শুধু যদি collection daily_ai_signals না হয়)
+    if collection != "daily_ai_signals" and data:
+        symbols = list(set([doc.get('symbol') for doc in data if doc.get('symbol')]))
+        if symbols:
+            sector_map = await get_latest_sectors_for_symbols(symbols)
+            for doc in data:
+                symbol = doc.get('symbol')
+                if symbol and symbol in sector_map:
+                    doc['sector'] = sector_map[symbol]
+                elif symbol:
+                    doc['sector'] = doc.get('sector', 'Other')
 
     return {"data": data}
 
 @app.delete("/api/delete-signal")
 async def delete_signal(collection: str = Query("daily_ai_signals"), symbol: str = Query(...), date: str = Query(...)):
     col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if col is None: 
+        return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     result = col.delete_one({'symbol': symbol, 'analysis_date': date})
     if result.deleted_count == 0:
         result = col.delete_one({'symbol': symbol, 'saved_at': {'$regex': f'^{date}'}})
@@ -808,7 +951,8 @@ async def delete_signal(collection: str = Query("daily_ai_signals"), symbol: str
 @app.delete("/api/delete-all-by-date")
 async def delete_all_by_date(collection: str = Query(...), date: str = Query(...)):
     col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if col is None: 
+        return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
     result1 = col.delete_many({'analysis_date': date})
     result2 = col.delete_many({'saved_at': {'$regex': f'^{date}'}})
     total = result1.deleted_count + result2.deleted_count
@@ -826,7 +970,8 @@ async def update_trade(
     risk_percent: float = Query(None)
 ):
     col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if col is None: 
+        return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
 
     update_fields = {
         'edited': True, 
@@ -861,7 +1006,8 @@ async def update_trade(
 @app.get("/api/collection-symbols")
 async def get_collection_symbols(collection: str = Query(...), date: str = Query(None)):
     col = get_mongo_collection(collection)
-    if col is None: return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
+    if col is None: 
+        return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
 
     query = {}
     if date:
@@ -875,7 +1021,7 @@ async def get_collection_symbols(collection: str = Query(...), date: str = Query
     return sorted([s for s in symbols if s])
 
 # ================================
-# HTML Dashboard
+# HTML Dashboard (Complete)
 # ================================
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -1556,10 +1702,13 @@ async def dashboard():
                 
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
+                // 🔑 Sector display - latest sector from MongoDB
+                const sectorDisplay = r.sector || 'Other';
+                
                 html += `<tr class="${rowClass}">
                     <td>${i+1}</td><td><strong>${r.symbol}${isEdited ? '<span class="edited-badge">✏️</span>' : ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
                     <td>${r.analysis_date||''}</td><td>${(r.current_price||0).toFixed(2)}</td><td>${ltpDisplay}</td>
-                    <td>${r.sector||''}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
+                    <td>${sectorDisplay}</td><td class="${getSignalClass(r.final_signal)}">${r.final_signal||''}</td>
                     <td><strong>${(r.final_combined_score||0).toFixed(1)}</strong></td>
                     <td>${r.llm_signal||''}</td><td>${(r.llm_confidence||0).toFixed(0)}%</td>
                     <td>${r.llm_strength||''}</td><td>${r.llm_bias||''}</td><td>${r.llm_available ? '✅' : '❌'}</td>
@@ -1623,8 +1772,11 @@ async def dashboard():
                 const recordDate = r.analysis_date || r.date || '';
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
+                // 🔑 Sector display - latest sector from MongoDB
+                const sectorDisplay = r.sector || 'Other';
+                
                 html += `<tr class="${rowClass}">
-                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td><td>${r.sector || ''}</td>
+                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td><td>${sectorDisplay}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
                     <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
@@ -1662,6 +1814,7 @@ async def dashboard():
             let html = `<table><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
+                <th>Sector</th>
                 <th>LTP</th>
                 ${keys.map(k => {
                     if (k === 'diff' || k === 'gape') {
@@ -1686,9 +1839,13 @@ async def dashboard():
                 const rrrClass = getRRRClass(rrr);
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
+                // 🔑 Sector display - latest sector from MongoDB
+                const sectorDisplay = r.sector || 'Other';
+                
                 html += `<tr class="${rowClass}">
                     <td>${i+1}</td>
                     <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
+                    <td>${sectorDisplay}</td>
                     <td>${ltpDisplay}</td>
                     ${keys.map(k => {
                         if (k === 'diff') {
