@@ -3,7 +3,7 @@ create_dashboard.py
 ✅ All Tabs with LTP + No Duplicate Date
 ✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
 ✅ DSE Website Market Status Check - FIXED
-✅ AI Signals (37 cols) + SWRSI + S/R + MACD + EMA 21 + Daily Buy
+✅ AI Signals (37 cols) + SWRSI + S/R + EMA 21 + Daily Buy
 ✅ S/R date selector FIXED (uses analysis_date like all other tabs)
 ✅ LTP Alert Modal + Delete All + Edit buttons
 ✅ Trade Management Modal with Entry/SL/TP/Exposure/Risk%
@@ -15,7 +15,8 @@ create_dashboard.py
 ✅ LTP Parser Matches Exact DSE Table Structure (td index 2, class shares-table)
 ✅ SSL Verification Disabled for DSE
 ✅ Sector from latest record per symbol (MongoDB aggregation)
-✅ Sector shown ONCE in all tabs (no duplicate)
+✅ Sector shown ONLY in AI Signals tab (no duplicate in other tabs)
+✅ MACD Tab Removed
 """
 
 import os
@@ -853,7 +854,7 @@ async def get_swrsi(
 
     data = list(cursor)
     
-    # 🔑 সিম্বলগুলোর sector আপডেট করুন (latest sector from MongoDB)
+    # 🔑 সিম্বলগুলোর sector আপডেট করুন (latest sector from MongoDB) - শুধুমাত্র SWRSI এর জন্য
     if data:
         symbols = list(set([doc.get('symbol') for doc in data if doc.get('symbol')]))
         sector_map = await get_latest_sectors_for_symbols(symbols)
@@ -926,7 +927,8 @@ async def get_generic_data(
     data = list(cursor.limit(limit))
     
     # 🔑 সিম্বলগুলোর sector আপডেট করুন (শুধু যদি collection daily_ai_signals না হয়)
-    if collection != "daily_ai_signals" and data:
+    # এবং sector ফিল্ডটি ডেটাতে যোগ করুন (যদি না থাকে)
+    if data:
         symbols = list(set([doc.get('symbol') for doc in data if doc.get('symbol')]))
         if symbols:
             sector_map = await get_latest_sectors_for_symbols(symbols)
@@ -1114,7 +1116,6 @@ async def dashboard():
         <div class="tab active" onclick="switchTab('ai_signals')">🤖 AI Signals</div>
         <div class="tab" onclick="switchTab('swrsi')">🔍 SWRSI</div>
         <div class="tab" onclick="switchTab('support')">📊 S/R</div>
-        <div class="tab" onclick="switchTab('macd')">📉 MACD</div>
         <div class="tab" onclick="switchTab('ema')">📈 EMA 21</div>
         <div class="tab" onclick="switchTab('buy')">✅ Daily Buy</div>
     </div>
@@ -1206,7 +1207,6 @@ async def dashboard():
             ai_signals: 'daily_ai_signals', 
             swrsi: 'swrsi_signals', 
             support: 'support_resistance', 
-            macd: 'macd_signals', 
             ema: 'ema_21_signals', 
             buy: 'daily_buy_signals' 
         };
@@ -1340,7 +1340,7 @@ async def dashboard():
                 const r = await fetch(url); const j = await r.json();
                 currentData = j.signals || [];
             } else {
-                const map = { support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+                const map = { support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
                 let url = `/api/generic-data?collection=${map[currentTab]}&limit=500${sortParam}`;
                 if (date) url += `&date=${date}`;
                 if (symbol) url += `&symbol=${symbol}`;
@@ -1361,7 +1361,7 @@ async def dashboard():
             event.target.classList.add('active');
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
             loadDates(map[t]);
             loadCurrentTab();
         }
@@ -1647,13 +1647,14 @@ async def dashboard():
 
         async function deleteRecord(symbol, date, tab = 'ai_signals') {
             if (!confirm(`Delete ${symbol}?`)) return;
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', macd: 'macd_signals', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
             await fetch(`/api/delete-signal?collection=${map[tab]}&symbol=${symbol}&date=${date}`, { method: 'DELETE' });
             loadCurrentTab();
         }
 
         // ==================== RENDER FUNCTIONS ====================
         
+        // ✅ AI Signals Tab - Sector দেখাবে
         function renderAITable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
@@ -1705,7 +1706,7 @@ async def dashboard():
                 
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
-                // 🔑 Sector display - only once
+                // 🔑 Sector display - AI Signals ট্যাবে একবার
                 const sectorDisplay = r.sector || 'Other';
                 
                 html += `<tr class="${rowClass}">
@@ -1741,6 +1742,7 @@ async def dashboard():
             document.getElementById('recordCount').textContent = `(${currentData.length} signals)`;
         }
 
+        // ❌ SWRSI Tab - Sector দেখাবে না (সরানো হয়েছে)
         function renderSWRSITable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No SWRSI signals found</p>'; return; }
@@ -1748,7 +1750,6 @@ async def dashboard():
             let html = `<table><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
-                <th>Sector</th>
                 <th>LTP</th>
                 <th onclick="handleSort('composite_score')">Composite Score${getSortIndicator('composite_score')}</th>
                 <th>Weekly Div</th><th>Weekly Label</th><th>Weekly Score</th>
@@ -1776,12 +1777,8 @@ async def dashboard():
                 const recordDate = r.analysis_date || r.date || '';
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
-                // 🔑 Sector display - only once
-                const sectorDisplay = r.sector || 'Other';
-                
                 html += `<tr class="${rowClass}">
                     <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
-                    <td>${sectorDisplay}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
                     <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
@@ -1807,11 +1804,12 @@ async def dashboard():
             div.innerHTML = html;
         }
 
+        // ❌ Other Tabs (S/R, EMA, Daily Buy) - Sector দেখাবে না
         function renderGenericTable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
             
-            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at','p1_date','p2_date','level_date','level_price','type','high_x','high_y','no','prev_high','swing_highs_count','swing_highs_details','uptrand_date','SL','buy','dd','dl','No','low'
+            const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at','p1_date','p2_date','level_date','level_price','type','high_x','high_y','no','prev_high','swing_highs_count','swing_highs_details','uptrand_date','SL','buy','dd','dl','No','low','sector','Sector'
             ,'bearish_count','bearish_pct','bullish_count','bullish_pct','bull_bear_ratio','GAPE','HIGH','NO','last_price','last_rsi','market_bias','NO','previous_date','previous_price','previous_rsi','retio_text','saved_timestamp','close','original_date','bbr','rt','strong'
             ];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
@@ -1819,7 +1817,6 @@ async def dashboard():
             let html = `<table><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
-                <th>Sector</th>
                 <th>LTP</th>
                 ${keys.map(k => {
                     if (k === 'diff' || k === 'gape') {
@@ -1844,13 +1841,9 @@ async def dashboard():
                 const rrrClass = getRRRClass(rrr);
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
-                // 🔑 Sector display - only once
-                const sectorDisplay = r.sector || 'Other';
-                
                 html += `<tr class="${rowClass}">
                     <td>${i+1}</td>
                     <td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
-                    <td>${sectorDisplay}</td>
                     <td>${ltpDisplay}</td>
                     ${keys.map(k => {
                         if (k === 'diff') {
