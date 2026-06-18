@@ -1807,7 +1807,7 @@ async def dashboard():
             if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
             
             const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at','p1_date','p2_date','level_date','level_price','type','high_x','high_y','no','prev_high','swing_highs_count','swing_highs_details','uptrand_date','SL','buy','dd','dl','No','low'
-            ,'bearish_count','bearish_pct','bullish_count','bullish_pct','bull_bear_ratio','GAPE','HIGH','NO','last_price','last_rsi','market_bias','NO','previous_date','previous_price','previous_rsi','retio_text','saved_timestamp','close','original_date','bbr','rt','strong','Sector'
+            ,'bearish_count','bearish_pct','bullish_count','bullish_pct','bull_bear_ratio','GAPE','HIGH','NO','last_price','last_rsi','market_bias','NO','previous_date','previous_price','previous_rsi','retio_text','saved_timestamp','close','original_date','bbr','rt','strong','sector'
             ];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             
