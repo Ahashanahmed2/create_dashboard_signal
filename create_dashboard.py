@@ -15,6 +15,7 @@ create_dashboard.py
 ✅ LTP Parser Matches Exact DSE Table Structure (td index 2, class shares-table)
 ✅ SSL Verification Disabled for DSE
 ✅ Sector from latest record per symbol (MongoDB aggregation)
+✅ Sector shown ONCE in all tabs (no duplicate)
 """
 
 import os
@@ -1651,6 +1652,8 @@ async def dashboard():
             loadCurrentTab();
         }
 
+        // ==================== RENDER FUNCTIONS ====================
+        
         function renderAITable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p style="color:#888;text-align:center;padding:40px;">No data</p>'; return; }
@@ -1702,7 +1705,7 @@ async def dashboard():
                 
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
-                // 🔑 Sector display - latest sector from MongoDB
+                // 🔑 Sector display - only once
                 const sectorDisplay = r.sector || 'Other';
                 
                 html += `<tr class="${rowClass}">
@@ -1745,7 +1748,8 @@ async def dashboard():
             let html = `<table><thead><tr>
                 <th>#</th>
                 <th onclick="handleSort('symbol')">Symbol${getSortIndicator('symbol')}</th>
-                <th>Sector</th><th>LTP</th>
+                <th>Sector</th>
+                <th>LTP</th>
                 <th onclick="handleSort('composite_score')">Composite Score${getSortIndicator('composite_score')}</th>
                 <th>Weekly Div</th><th>Weekly Label</th><th>Weekly Score</th>
                 <th>Prev Low</th><th>Curr Low</th><th>Prev RSI</th><th>Curr RSI</th>
@@ -1772,11 +1776,12 @@ async def dashboard():
                 const recordDate = r.analysis_date || r.date || '';
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
-                // 🔑 Sector display - latest sector from MongoDB
+                // 🔑 Sector display - only once
                 const sectorDisplay = r.sector || 'Other';
                 
                 html += `<tr class="${rowClass}">
-                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td><td>${sectorDisplay}</td>
+                    <td>${i+1}</td><td><strong>${r.symbol || ''}${hasTrade ? '<span class="trade-badge">💰</span>' : ''}${alertStatus ? ' 🔔' : ''}${breakBadge}</strong></td>
+                    <td>${sectorDisplay}</td>
                     <td>${ltpDisplay}</td>
                     <td>${(r.composite_score || 0).toFixed(0)}</td>
                     <td>${r.weekly_divergence || ''}</td><td>${r.weekly_strength_label || ''}</td>
@@ -1807,7 +1812,7 @@ async def dashboard():
             if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
             
             const excludeKeys = ['_id', 'saved_at', 'analysis_date', 'latest_date', 'analysis_datetime', 'date', 'symbol', 'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio', 'total_exposure', 'risk_percent', 'edited', 'edited_at','p1_date','p2_date','level_date','level_price','type','high_x','high_y','no','prev_high','swing_highs_count','swing_highs_details','uptrand_date','SL','buy','dd','dl','No','low'
-            ,'bearish_count','bearish_pct','bullish_count','bullish_pct','bull_bear_ratio','GAPE','HIGH','NO','last_price','last_rsi','market_bias','NO','previous_date','previous_price','previous_rsi','retio_text','saved_timestamp','close','original_date','bbr','rt','strong','sector'
+            ,'bearish_count','bearish_pct','bullish_count','bullish_pct','bull_bear_ratio','GAPE','HIGH','NO','last_price','last_rsi','market_bias','NO','previous_date','previous_price','previous_rsi','retio_text','saved_timestamp','close','original_date','bbr','rt','strong'
             ];
             const keys = Object.keys(currentData[0]).filter(k => !excludeKeys.includes(k) && !k.startsWith('_'));
             
@@ -1839,7 +1844,7 @@ async def dashboard():
                 const rrrClass = getRRRClass(rrr);
                 const breakBadge = ltpBreakHigh ? '<span class="ltp-break-badge">🚀HIGH</span>' : '';
                 
-                // 🔑 Sector display - latest sector from MongoDB
+                // 🔑 Sector display - only once
                 const sectorDisplay = r.sector || 'Other';
                 
                 html += `<tr class="${rowClass}">
