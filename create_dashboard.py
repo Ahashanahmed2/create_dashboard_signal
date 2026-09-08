@@ -3,7 +3,7 @@ create_dashboard.py
 ✅ All Tabs with LTP + No Duplicate Date
 ✅ DSE Market: Sun-Thu 10AM-2:20PM (Bangladesh Time UTC+6)
 ✅ DSE Website Market Status Check - FIXED
-✅ AI Signals (37 cols) + SWRSI + S/R + EMA 21 + Daily Buy
+✅ AI Signals (37 cols) + SWRSI + S/R + RSI + Daily Buy
 ✅ S/R date selector FIXED (uses analysis_date like all other tabs)
 ✅ LTP Alert Modal + Delete All + Edit buttons
 ✅ Trade Management Modal with Entry/SL/TP/Exposure/Risk%
@@ -17,6 +17,7 @@ create_dashboard.py
 ✅ Sector from latest record per symbol (MongoDB aggregation)
 ✅ Sector shown ONLY in AI Signals tab (no duplicate in other tabs)
 ✅ MACD Tab Removed
+✅ EMA 21 Tab Removed - RSI Tab Added
 """
 
 import os
@@ -39,7 +40,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="18.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="19.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -296,22 +297,22 @@ async def get_latest_sectors_for_symbols(symbols):
     """
     if not symbols:
         return {}
-    
+
     # ক্যাশ চেক
     current_time = get_bd_time()
     if (sector_cache["timestamp"] and 
         (current_time - sector_cache["timestamp"]).total_seconds() < sector_cache["expiry_seconds"] and
         sector_cache["data"]):
-        
+
         # শুধু প্রয়োজনীয় সিম্বল ফিল্টার করুন
         filtered_cache = {k: v for k, v in sector_cache["data"].items() if k in symbols}
         if filtered_cache:
             return filtered_cache
-    
+
     col = get_mongo_collection("daily_ai_signals")
     if col is None:
         return {}
-    
+
     try:
         # Aggregation pipeline ব্যবহার করে প্রতিটি সিম্বলের latest sector বের করুন
         pipeline = [
@@ -324,20 +325,20 @@ async def get_latest_sectors_for_symbols(symbols):
             }},
             {"$match": {"latest_sector": {"$ne": None, "$ne": ""}}}
         ]
-        
+
         results = list(col.aggregate(pipeline))
-        
+
         sector_map = {}
         for doc in results:
             sector_map[doc["_id"]] = doc["latest_sector"]
-        
+
         # ক্যাশ আপডেট করুন
         if sector_map:
             sector_cache["data"].update(sector_map)
             sector_cache["timestamp"] = current_time
-        
+
         return sector_map
-    
+
     except Exception as e:
         print(f"[SECTOR] Error fetching sectors: {e}")
         return {}
@@ -346,7 +347,7 @@ async def get_latest_sector_for_symbol(symbol):
     """একটি সিম্বলের সর্বশেষ sector বের করুন"""
     if not symbol:
         return None
-    
+
     sector_map = await get_latest_sectors_for_symbols([symbol])
     return sector_map.get(symbol)
 
@@ -367,10 +368,13 @@ async def health():
     col = get_mongo_collection()
     swrsi_col = get_mongo_collection("swrsi_signals") if MONGODB_URI else None
     swrsi_count = swrsi_col.count_documents({}) if swrsi_col else 0
+    rsi_col = get_mongo_collection("rsi_signals") if MONGODB_URI else None
+    rsi_count = rsi_col.count_documents({}) if rsi_col else 0
     return {
         "status": "ok", 
         "mongodb": "connected" if col else "not configured",
         "swrsi_signals": swrsi_count,
+        "rsi_signals": rsi_count,
         "dse_market": "OPEN" if is_dse_market_open() else "CLOSED",
         "bangladesh_time": get_bd_time().strftime('%Y-%m-%d %H:%M:%S')
     }
@@ -751,7 +755,7 @@ async def get_latest_sectors(symbols: str = Query(None)):
         col = get_mongo_collection("daily_ai_signals")
         if col is None:
             return JSONResponse({"error": "MongoDB not configured"}, status_code=500)
-        
+
         # সব সিম্বল বের করুন
         all_symbols = col.distinct('symbol')
         sector_map = await get_latest_sectors_for_symbols(all_symbols)
@@ -798,15 +802,15 @@ async def get_signals(
     cursor = cursor.limit(limit)
 
     data = list(cursor)
-    
+
     # 🔑 প্রতিটি সিম্বলের জন্য sector আপডেট করুন (latest sector from MongoDB)
     if data:
         # সব সিম্বল সংগ্রহ করুন
         symbols = list(set([doc.get('symbol') for doc in data if doc.get('symbol')]))
-        
+
         # লেটেস্ট sectors বের করুন
         sector_map = await get_latest_sectors_for_symbols(symbols)
-        
+
         # প্রতিটি ডকুমেন্টে sector যোগ করুন
         for doc in data:
             symbol = doc.get('symbol')
@@ -853,19 +857,19 @@ async def get_swrsi(
         cursor = cursor.sort(sort_criteria)
 
     data = list(cursor)
-    
+
     # 🔑 সিম্বলগুলোর sector আপডেট করুন (latest sector from MongoDB) - শুধুমাত্র SWRSI এর জন্য
     if data:
         symbols = list(set([doc.get('symbol') for doc in data if doc.get('symbol')]))
         sector_map = await get_latest_sectors_for_symbols(symbols)
-        
+
         for doc in data:
             symbol = doc.get('symbol')
             if symbol and symbol in sector_map:
                 doc['sector'] = sector_map[symbol]
             elif symbol:
                 doc['sector'] = doc.get('sector', 'Other')
-    
+
     all_dates = sorted(col.distinct('analysis_date'), reverse=True)
     return {"signals": data, "total_signals": len(data), "available_dates": all_dates}
 
@@ -925,7 +929,7 @@ async def get_generic_data(
     if sort_criteria:
         cursor = cursor.sort(sort_criteria)
     data = list(cursor.limit(limit))
-    
+
     # 🔑 সিম্বলগুলোর sector আপডেট করুন (শুধু যদি collection daily_ai_signals না হয়)
     # এবং sector ফিল্ডটি ডেটাতে যোগ করুন (যদি না থাকে)
     if data:
@@ -1116,7 +1120,7 @@ async def dashboard():
         <div class="tab active" onclick="switchTab('ai_signals')">🤖 AI Signals</div>
         <div class="tab" onclick="switchTab('swrsi')">🔍 SWRSI</div>
         <div class="tab" onclick="switchTab('support')">📊 S/R</div>
-        <div class="tab" onclick="switchTab('ema')">📈 EMA 21</div>
+        <div class="tab" onclick="switchTab('rsi')">📈 RSI</div>
         <div class="tab" onclick="switchTab('buy')">✅ Daily Buy</div>
     </div>
     <div class="controls" id="allControls">
@@ -1207,7 +1211,7 @@ async def dashboard():
             ai_signals: 'daily_ai_signals', 
             swrsi: 'swrsi_signals', 
             support: 'support_resistance', 
-            ema: 'ema_21_signals', 
+            rsi: 'rsi_signals', 
             buy: 'daily_buy_signals' 
         };
 
@@ -1340,7 +1344,7 @@ async def dashboard():
                 const r = await fetch(url); const j = await r.json();
                 currentData = j.signals || [];
             } else {
-                const map = { support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+                const map = { support: 'support_resistance', rsi: 'rsi_signals', buy: 'daily_buy_signals' };
                 let url = `/api/generic-data?collection=${map[currentTab]}&limit=500${sortParam}`;
                 if (date) url += `&date=${date}`;
                 if (symbol) url += `&symbol=${symbol}`;
@@ -1361,7 +1365,7 @@ async def dashboard():
             event.target.classList.add('active');
             currentTab = t;
             document.getElementById('symbolSearch').value = '';
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', rsi: 'rsi_signals', buy: 'daily_buy_signals' };
             loadDates(map[t]);
             loadCurrentTab();
         }
@@ -1647,7 +1651,7 @@ async def dashboard():
 
         async function deleteRecord(symbol, date, tab = 'ai_signals') {
             if (!confirm(`Delete ${symbol}?`)) return;
-            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', ema: 'ema_21_signals', buy: 'daily_buy_signals' };
+            const map = { ai_signals: 'daily_ai_signals', swrsi: 'swrsi_signals', support: 'support_resistance', rsi: 'rsi_signals', buy: 'daily_buy_signals' };
             await fetch(`/api/delete-signal?collection=${map[tab]}&symbol=${symbol}&date=${date}`, { method: 'DELETE' });
             loadCurrentTab();
         }
@@ -1804,7 +1808,7 @@ async def dashboard():
             div.innerHTML = html;
         }
 
-        // ❌ Other Tabs (S/R, EMA, Daily Buy) - Sector দেখাবে না
+        // ❌ Other Tabs (S/R, RSI, Daily Buy) - Sector দেখাবে না
         function renderGenericTable() {
             const div = document.getElementById('dynamicTable');
             if (!currentData.length) { div.innerHTML = '<p>No data</p>'; return; }
