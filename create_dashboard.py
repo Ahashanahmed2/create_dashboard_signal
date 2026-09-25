@@ -1,17 +1,18 @@
 """
 create_dashboard.py
 ✅ 100% new.dsebd.org — old site puropuri baad
-✅ LTP + Market status from new site only
-✅ Time from DSE's own header (BST/UTC+6), not device clock
-✅ All Tabs (AI Signals 37 cols, SWRSI, S/R, RSI, Daily Buy)
+✅ LTP from tickerInitial JSON (388 symbols)
+✅ Market status from DSE header time (BST/UTC+6)
+✅ MongoDB theke high/low merge kore breakout highlight
+✅ All Tabs (AI Signals, SWRSI, S/R, RSI, Daily Buy)
 ✅ Sector cache via MongoDB aggregation
 ✅ Trade Modal, LTP Alert, RRR, UptimeRobot HEAD
-✅ LTP > High Breakout Row Highlight (GREEN)
 ✅ Default Sort: diff ASC, gape DESC
 """
 
 import os
 import re
+import json
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Query
@@ -28,10 +29,9 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="21.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="22.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# static folder thakle mount korbe, na thakle skip
 try:
     if os.path.isdir("static"):
         app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -67,7 +67,7 @@ def get_bd_time():
     return datetime.now(BD_TIMEZONE)
 
 # =========================================
-# Session — realistic browser
+# Session
 # =========================================
 def make_session():
     s = requests.Session()
@@ -88,7 +88,6 @@ def make_session():
 # Market status
 # =========================================
 def _fetch_dse_header_time(session):
-    """new.dsebd.org header theke 'On Sep 26, 2026 at 8:21 PM' ber kori."""
     try:
         r = session.get(DSE_LATEST, timeout=15)
         if r.status_code != 200:
@@ -111,14 +110,6 @@ def _fetch_dse_header_time(session):
             except ValueError:
                 pass
 
-        m = re.search(r'On\s+(\d{1,2} \w+ \d{4})\s+at\s+(\d{1,2}:\d{2})', html)
-        if m:
-            try:
-                return datetime.strptime(f"{m.group(1)} {m.group(2)}",
-                                         "%d %b %Y %H:%M").replace(tzinfo=BD_TIMEZONE)
-            except ValueError:
-                pass
-
         return None
     except Exception as e:
         print(f"[DSE] header time parse error: {e}")
@@ -127,7 +118,7 @@ def _fetch_dse_header_time(session):
 
 def _is_dse_market_open_by_time():
     now = get_bd_time()
-    wd = now.weekday()  # Mon=0 … Fri=4, Sat=5, Sun=6
+    wd = now.weekday()
     if wd in [4, 5]:
         print(f"[DSE] ❌ CLOSED (weekend day={wd})")
         return False
@@ -142,7 +133,6 @@ def _is_dse_market_open_by_time():
 def is_dse_market_open():
     session = make_session()
 
-    # Method 1: header date/time
     dse_time = _fetch_dse_header_time(session)
     if dse_time is not None:
         now_dse = get_bd_time()
@@ -152,7 +142,6 @@ def is_dse_market_open():
         print(f"[DSE] ❌ CLOSED (header date {dse_time.date()} != today {now_dse.date()})")
         return False
 
-    # Method 2: page text
     try:
         r = session.get(DSE_LATEST, timeout=15)
         if r.status_code == 200:
@@ -166,7 +155,6 @@ def is_dse_market_open():
     except Exception as e:
         print(f"[DSE] page text check failed: {e}")
 
-    # Method 3: time fallback
     print("[DSE] ⚠️ using time fallback")
     return _is_dse_market_open_by_time()
 
@@ -177,41 +165,48 @@ def get_dse_header_time_str():
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 # =========================================
-# LTP parser (only new site)
+# LTP parser — tickerInitial JSON
 # =========================================
 def parse_new_site_ltp(html_text):
     """
-    Table columns:
-      # | TRADING CODE | LTP* | HIGH | LOW | CLOSEP* | YCP* | CHANGE | TRADE | VALUE | VOLUME
-      idx: 0|1|2|3|4|5|6|7|8|9|10
+    new.dsebd.org er HTML table skeleton; real data tickerInitial JSON-e.
+    tickerInitial: [{code, price, change, delta}, ...]
     """
-    soup = BeautifulSoup(html_text, 'html.parser')
     ltp_data = {}
+    try:
+        m = re.search(r'"tickerInitial"\s*:\s*(\[[^\]]*\])', html_text)
+        if not m:
+            print("[parse] ❌ tickerInitial not found")
+            return ltp_data
 
-    for table in soup.find_all('table'):
-        for row in table.find_all('tr'):
-            cells = row.find_all('td')
-            if len(cells) < 3:
-                continue
-            a = cells[1].find('a')
-            symbol = (a.get_text(strip=True) if a else cells[1].get_text(strip=True))
-            if not symbol or len(symbol) < 2:
+        raw = m.group(1)
+        try:
+            raw = raw.encode('utf-8').decode('unicode_escape')
+        except Exception:
+            pass
+
+        tickers = json.loads(raw)
+        for t in tickers:
+            sym = t.get('code')
+            price = t.get('price')
+            if not sym:
                 continue
             try:
-                ltp_text = cells[2].get_text(strip=True).replace(',', '')
-                ltp = float(ltp_text)
+                ltp = float(str(price).replace(',', ''))
                 if 0 < ltp < 50000:
-                    ltp_data[symbol.upper().strip()] = ltp
-            except (ValueError, IndexError):
+                    ltp_data[sym.upper().strip()] = ltp
+            except (ValueError, TypeError):
                 continue
 
-    print(f"📊 [new] LTP parsed: {len(ltp_data)} symbols")
-    if ltp_data:
-        print(f"📊 [new] sample: {list(ltp_data.items())[:3]}")
+        print(f"📊 [new] tickerInitial: {len(ltp_data)} symbols")
+        if ltp_data:
+            print(f"📊 [new] sample: {list(ltp_data.items())[:5]}")
+    except Exception as e:
+        print(f"[parse] error: {e}")
     return ltp_data
 
 # =========================================
-# Sector helpers
+# Sector + high/low helpers (MongoDB)
 # =========================================
 async def get_latest_sectors_for_symbols(symbols):
     if not symbols:
@@ -243,13 +238,33 @@ async def get_latest_sectors_for_symbols(symbols):
         print(f"[SECTOR] error: {e}")
         return {}
 
+
+async def get_latest_highs_for_symbols(symbols):
+    """MongoDB theke latest high ber kori (breakout highlight er jonno)."""
+    if not symbols:
+        return {}
+    col = get_mongo_collection("daily_ai_signals")
+    if col is None:
+        return {}
+    try:
+        pipeline = [
+            {"$match": {"symbol": {"$in": symbols}, "high": {"$ne": None}}},
+            {"$sort": {"analysis_date": -1}},
+            {"$group": {"_id": "$symbol", "latest_high": {"$first": "$high"}}},
+        ]
+        results = list(col.aggregate(pipeline))
+        return {d["_id"]: d["latest_high"] for d in results}
+    except Exception as e:
+        print(f"[HIGH] error: {e}")
+        return {}
+
 # =========================================
 # LTP Cache
 # =========================================
 ltp_cache = {"data": {}, "timestamp": None}
 
 # =========================================
-# API endpoints
+# API
 # =========================================
 @app.api_route("/head", methods=["GET", "HEAD"])
 async def uptime_robot_head():
@@ -328,26 +343,18 @@ async def get_dse_ltp():
 
     return {
         "status": "error",
-        "message": "DSE থেকে LTP ডাটা পাওয়া যায়নি",
+        "message": "DSE theke LTP data paoa jayni",
         "ltp_data": {},
         "source": "new.dsebd.org",
     }
 
-@app.get("/api/test-ltp")
-async def test_ltp():
-    session = make_session()
-    try:
-        r = session.get(DSE_LATEST, timeout=20)
-        return {
-            "status": r.status_code,
-            "html_length": len(r.text),
-            "has_table": '<table' in r.text,
-            "has_trading_code": 'TRADING CODE' in r.text,
-            "has_1JANATAMF": '1JANATAMF' in r.text,
-            "first_400": r.text[:400].replace('\n', ' '),
-        }
-    except Exception as e:
-        return {"error": str(e)}
+@app.get("/api/dse-highs")
+async def get_dse_highs(symbols: str = Query(None)):
+    """MongoDB theke latest high map - frontend merge korbe."""
+    if not symbols:
+        return {}
+    syms = [s.strip().upper() for s in symbols.split(',') if s.strip()]
+    return await get_latest_highs_for_symbols(syms)
 
 # =========================================
 # Date query helpers
@@ -583,7 +590,6 @@ DASHBOARD_HTML = r"""
         table { width: 100%; border-collapse: collapse; font-size: 0.7em; background: #111122; border-radius: 10px; overflow: hidden; }
         th { background: #1a1a2e; padding: 10px 5px; color: #00d4ff; white-space: nowrap; cursor: pointer; user-select: none; }
         th:hover { background: #1e1e38; }
-        th.sorted { color: #ffa500; }
         .sort-indicator { font-size: 0.8em; margin-left: 3px; }
         td { padding: 5px; border-bottom: 1px solid #222; white-space: nowrap; }
         .edit-btn { background: #ffa500; color: #000; border: none; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 0.7em; }
@@ -708,6 +714,7 @@ DASHBOARD_HTML = r"""
         let currentTab = 'ai_signals';
         let currentData = [];
         let dseLtpData = {};
+        let dseHighData = {};
         let editingRow = null;
         let alertRules = [];
         let currentTradeSymbol = null;
@@ -731,12 +738,12 @@ DASHBOARD_HTML = r"""
         updateSortStatus();
 
         function loadAlertRules() {
-            const saved = localStorage.getItem('ltpAlertRules_v31');
+            const saved = localStorage.getItem('ltpAlertRules_v32');
             if (saved) { try { alertRules = JSON.parse(saved); } catch(e) { alertRules = []; } }
             updateAlertUI();
         }
         function saveAlertRules() {
-            localStorage.setItem('ltpAlertRules_v31', JSON.stringify(alertRules));
+            localStorage.setItem('ltpAlertRules_v32', JSON.stringify(alertRules));
             updateAlertUI(); renderCurrentTab();
         }
         function updateAlertUI() {
@@ -789,8 +796,23 @@ DASHBOARD_HTML = r"""
                     dseLtpData = j.ltp_data;
                     console.log(`📊 LTP from ${j.source}: ${j.total_symbols} @ ${j.dse_time}`);
                 }
+                // high map load
+                await loadDseHighs();
                 renderCurrentTab();
             } catch(e) { console.error('LTP', e.message); }
+        }
+
+        async function loadDseHighs() {
+            try {
+                // currentData teke symbol list
+                const syms = (currentData || []).map(x => x.symbol).filter(Boolean).slice(0, 500);
+                if (!syms.length) return;
+                const r = await fetch(`/api/dse-highs?symbols=${encodeURIComponent(syms.join(','))}`);
+                const j = await r.json();
+                if (j && typeof j === 'object') {
+                    dseHighData = j;
+                }
+            } catch(e) { console.error('highs', e.message); }
         }
 
         async function loadDates(c) {
@@ -826,6 +848,7 @@ DASHBOARD_HTML = r"""
                 const j = await (await fetch(url)).json();
                 currentData = j.data || [];
             }
+            await loadDseHighs();
             renderCurrentTab();
         }
 
@@ -865,17 +888,25 @@ DASHBOARD_HTML = r"""
             }
             return null;
         }
+        // ✅ highPrice na thakle MongoDB theke niye breakout check
+        function resolveHigh(symbol, highPrice) {
+            let h = highPrice;
+            if (!h || h <= 0) h = dseHighData[symbol] || 0;
+            return h;
+        }
         function isLtpAboveHigh(symbol, highPrice) {
             const ltp = dseLtpData[symbol] || null;
-            if (!ltp || !highPrice || highPrice <= 0) return false;
-            return ltp > highPrice;
+            const h = resolveHigh(symbol, highPrice);
+            if (!ltp || !h || h <= 0) return false;
+            return ltp > h;
         }
         function getLtpDisplay(symbol, highPrice) {
             const ltp = dseLtpData[symbol] || null;
             const alertStatus = getLtpAlertStatus(symbol);
+            const h = resolveHigh(symbol, highPrice);
             if (!ltp) return '<span style="color:#888;">-</span>';
             let cls = '', arrow = '';
-            if (highPrice && ltp > highPrice) { cls = 'ltp-above'; arrow = ' 🚀'; }
+            if (h && ltp > h) { cls = 'ltp-above'; arrow = ' 🚀'; }
             else if (alertStatus === 'above') { cls = 'ltp-above'; arrow = ' ↑'; }
             else if (alertStatus === 'below') { cls = 'ltp-below'; arrow = ' ↓'; }
             return `<span class="${cls}" style="font-weight:bold;">${ltp.toFixed(2)}${arrow}</span>`;
