@@ -1,11 +1,11 @@
 """
-create_dashboard.py — v24.0.0 (CLEAN REBUILD)
+create_dashboard.py — v25.0.0 (FULL CHROME HEADERS for Render compatibility)
 ✅ new.dsebd.org ONLY
+✅ Full browser headers → DSE datacenter IP block bypass
 ✅ tickerInitial JSON → 388 symbols LTP
 ✅ Market status from DSE header time (NO UTC+6)
 ✅ High + Low from MongoDB → breakout/breakdown highlight
 ✅ All Tabs, Trade Modal, Alerts, RRR
-✅ Default Sort: diff ASC, gape DESC
 """
 
 import os
@@ -25,7 +25,7 @@ MONGODB_URI = os.environ.get("MONGODBEMAIL_URI", "")
 DATABASE_NAME = "swing_trading_db"
 COLLECTION_NAME = "daily_ai_signals"
 
-app = FastAPI(title="AI Trading Signals Dashboard", version="24.0.0")
+app = FastAPI(title="AI Trading Signals Dashboard", version="25.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,10 +34,11 @@ app.add_middleware(
 )
 
 # =========================================
-# DSE URL (ONLY new.dsebd.org)
+# DSE URL
 # =========================================
 DSE_BASE = "https://new.dsebd.org"
 DSE_LATEST = f"{DSE_BASE}/markets/latest-share-price"
+
 
 # =========================================
 # MongoDB
@@ -54,7 +55,7 @@ def get_mongo_collection(collection_name=None):
 
 
 # =========================================
-# Session
+# Session — FULL CHROME HEADERS (DSE IP block bypass)
 # =========================================
 def make_session():
     s = requests.Session()
@@ -63,28 +64,72 @@ def make_session():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                       'AppleWebKit/537.36 (KHTML, like Gecko) '
                       'Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,'
+                  'image/avif,image/webp,image/apng,*/*;q=0.8,'
+                  'application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
         'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'max-age=0',
         'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'DNT': '1',
+        'Referer': 'https://new.dsebd.org/',
+        'Origin': 'https://new.dsebd.org',
     })
     return s
 
 
 # =========================================
-# Fetch DSE page (returns html + fetched_at)
+# Fetch DSE page
 # =========================================
 def fetch_dse_page():
-    """Returns (html_text, status_code, error_msg)."""
+    """
+    Fetch new.dsebd.org latest-share-price with full browser headers.
+    Returns (html_text, status_code, error_msg).
+    """
     try:
         s = make_session()
-        r = s.get(DSE_LATEST, timeout=20)
+
+        # Step 1: Visit homepage first (set cookies)
+        try:
+            s.get(f"{DSE_BASE}/", timeout=15)
+        except Exception:
+            pass
+
+        # Step 2: Fetch the actual page
+        r = s.get(DSE_LATEST, timeout=25)
+
         if r.status_code != 200:
+            print(f"[LTP] ❌ HTTP {r.status_code}")
             return None, r.status_code, f"HTTP {r.status_code}"
-        return r.text, 200, None
+
+        html = r.text
+        print(f"[LTP] ✅ fetched: {len(html)} bytes, status={r.status_code}")
+
+        # Debug if tickerInitial missing
+        if 'tickerInitial' not in html:
+            print(f"[LTP] ⚠️ tickerInitial NOT found. First 300 chars:")
+            print(html[:300])
+            try:
+                with open("/tmp/dse_debug.html", "w", encoding="utf-8") as f:
+                    f.write(html)
+                print("[LTP] 💾 saved to /tmp/dse_debug.html")
+            except Exception:
+                pass
+
+        return html, 200, None
+
     except Exception as e:
-        return None, 0, f"{type(e).__name__}: {e}"
+        err = f"{type(e).__name__}: {e}"
+        print(f"[LTP] ❌ fetch error: {err}")
+        return None, 0, err
 
 
 # =========================================
@@ -100,14 +145,12 @@ def parse_ticker_initial(html_text):
         return ltp_data
 
     try:
-        # Escape-aware regex
         m = re.search(r'"tickerInitial"\s*:\s*(\[[^\]]*\])', html_text)
         if not m:
             print("[LTP] ❌ tickerInitial not found in HTML")
             return ltp_data
 
         raw = m.group(1)
-        # Handle escaped quotes if any
         try:
             raw = raw.encode('utf-8').decode('unicode_escape')
         except Exception:
@@ -137,19 +180,12 @@ def parse_ticker_initial(html_text):
 # Market status — from DSE header time (NO UTC+6)
 # =========================================
 def parse_dse_header_time(html_text):
-    """
-    Extract 'On <date> at <time>' from header.
-    Returns naive datetime (DSE server time as-is).
-    """
     if not html_text:
         return None
 
     patterns = [
-        # "On Sep 26, 2026 at 4:58 AM"
         r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[AP]M)',
-        # "On Saturday, September 26, 2026 at 4:58 AM"
         r'On\s+\w+,\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[AP]M)',
-        # 24-hour
         r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2})',
     ]
     formats = ["%b %d, %Y %I:%M %p", "%B %d, %Y %I:%M %p", "%b %d, %Y %H:%M"]
@@ -165,22 +201,12 @@ def parse_dse_header_time(html_text):
 
 
 def detect_market_status_from_text(html_text):
-    """
-    Try textual hints from new.dsebd.org.
-    Look for:
-      'Market closed' / 'Market open'
-      'Opens Sun 27 Sept, 10:00 · in 1d 5h'
-    Returns (is_open: bool|None, next_open_str: str|None)
-    """
     if not html_text:
         return None, None
-
     next_open = None
     m = re.search(r'Opens\s+([A-Za-z]+\s+\d{1,2}\s+\w+,\s+\d{1,2}:\d{2})', html_text)
     if m:
         next_open = m.group(1).strip()
-
-    # Look for the badge text
     if re.search(r'Market\s+closed', html_text, re.IGNORECASE):
         return False, next_open
     if re.search(r'Market\s+open', html_text, re.IGNORECASE):
@@ -189,11 +215,6 @@ def detect_market_status_from_text(html_text):
 
 
 def is_market_open_fallback_time(dse_time):
-    """
-    Time-based fallback using DSE header time:
-      Fri(4), Sat(5) → closed
-      10:00 – 14:20 → open
-    """
     if dse_time is None:
         return None
     wd = dse_time.weekday()
@@ -217,7 +238,6 @@ ltp_cache = {
 
 
 def _refresh_ltp_cache(force=False):
-    """Fetch DSE page, parse LTP + header time + market status. Caches result."""
     now = datetime.now()
 
     if not force and ltp_cache["fetched_at"]:
@@ -247,12 +267,12 @@ def _refresh_ltp_cache(force=False):
     ltp_cache["is_open"] = bool(is_open)
     ltp_cache["next_open"] = next_open
 
-    print(f"🔄 [cache] fetched LTP={len(ltp_data)} | DSE time={ltp_cache['dse_time_str']} | open={is_open}")
+    print(f"🔄 [cache] LTP={len(ltp_data)} | DSE time={ltp_cache['dse_time_str']} | open={is_open}")
     return True
 
 
 # =========================================
-# Sector + High/Low caches (MongoDB)
+# Sector + High/Low caches
 # =========================================
 sector_cache = {"data": {}, "timestamp": None, "expiry_seconds": 300}
 hl_cache = {"data": {}, "timestamp": None, "expiry_seconds": 180}
@@ -334,7 +354,7 @@ async def get_latest_high_low_for_symbols(symbols):
 
 
 # =========================================
-# Health / HEAD (UptimeRobot)
+# Health / HEAD
 # =========================================
 @app.api_route("/head", methods=["GET", "HEAD"])
 async def uptime_head():
@@ -356,6 +376,20 @@ async def api_health():
     }
 
 
+@app.get("/api/debug-html")
+async def api_debug_html():
+    """Debug endpoint — DSE থেকে কী HTML আসছে দেখুন (first 5000 chars)."""
+    _refresh_ltp_cache(force=True)
+    html = ltp_cache.get("html") or ""
+    return {
+        "length": len(html),
+        "has_tickerInitial": "tickerInitial" in html,
+        "has_market_closed": "Market closed" in html,
+        "has_TRADING_CODE": "TRADING CODE" in html,
+        "first_1000_chars": html[:1000],
+    }
+
+
 # =========================================
 # Market status
 # =========================================
@@ -366,7 +400,6 @@ async def api_market_status():
     is_open = ltp_cache["is_open"]
     next_open = ltp_cache["next_open"]
 
-    # 10-minute close alert (using DSE header time)
     alert_10min = False
     if is_open and dse_time_str:
         try:
@@ -377,7 +410,6 @@ async def api_market_status():
         except Exception:
             pass
 
-    # Compute next_open if missing
     if not next_open and dse_time_str and not is_open:
         try:
             dt = datetime.strptime(dse_time_str, "%Y-%m-%d %H:%M:%S")
@@ -401,9 +433,6 @@ async def api_market_status():
     }
 
 
-# =========================================
-# LTP endpoint
-# =========================================
 @app.get("/api/dse-ltp")
 async def api_dse_ltp():
     _refresh_ltp_cache()
@@ -425,9 +454,6 @@ async def api_dse_ltp():
     }
 
 
-# =========================================
-# High/Low endpoint (MongoDB)
-# =========================================
 @app.get("/api/dse-highs")
 async def api_dse_highs(symbols: str = Query(None)):
     if not symbols:
@@ -811,7 +837,6 @@ DASHBOARD_HTML = r"""
 </div>
 
 <script>
-// ================= STATE =================
 const COLLECTION_MAP = {
     ai_signals: 'daily_ai_signals',
     swrsi:      'swrsi_signals',
@@ -830,7 +855,6 @@ let currentSort = { field: null, order: null };
 let debounceTimer = null;
 let lastMarketStatus = null;
 
-// ================= INIT =================
 document.addEventListener('DOMContentLoaded', () => {
     loadAlertRules();
     loadDates(COLLECTION_MAP[currentTab]);
@@ -847,7 +871,7 @@ function debounceLoad() {
     debounceTimer = setTimeout(loadCurrentTab, 300);
 }
 
-// ================= MARKET STATUS =================
+// ============ MARKET STATUS ============
 async function checkMarketStatus() {
     try {
         const r = await fetch('/api/market-status');
@@ -867,7 +891,7 @@ async function checkMarketStatus() {
     }
 }
 
-// ================= LTP + HL =================
+// ============ LTP + HL ============
 async function refreshLtpAndStatus() {
     await loadDseLtp();
     await loadDseHL();
@@ -901,7 +925,6 @@ async function loadDseHL() {
     }
 }
 
-// ================= DATES =================
 async function loadDates(col) {
     try {
         const r = await fetch(`/api/dates?collection=${col}`);
@@ -918,7 +941,6 @@ async function loadDates(col) {
     } catch (e) { console.error('dates', e); }
 }
 
-// ================= LOAD TAB =================
 async function loadCurrentTab() {
     const date = document.getElementById('dateSelect').value;
     const symbol = document.getElementById('symbolSearch').value.trim();
@@ -975,7 +997,7 @@ function switchTab(t, ev) {
     loadCurrentTab();
 }
 
-// ================= SORT =================
+// ============ SORT ============
 function updateSortStatus() {
     const s = document.getElementById('sortStatus');
     if (currentSort.field) {
@@ -1002,7 +1024,7 @@ function sortIndicator(field) {
     return '<span class="sort-ind" style="opacity:0.3;">⇅</span>';
 }
 
-// ================= HELPERS =================
+// ============ HELPERS ============
 function sigClass(s) {
     if (!s) return '';
     if (s.includes('STRONG BUY')) return 'sig-SB';
@@ -1069,7 +1091,7 @@ function rrrClass(r) {
     return 'rrr-low';
 }
 
-// ================= AI TABLE =================
+// ============ AI TABLE ============
 function renderAITable() {
     const div = document.getElementById('dynamicTable');
     if (!currentData.length) {
@@ -1149,7 +1171,7 @@ function renderAITable() {
     document.getElementById('recordCount').textContent = `(${currentData.length})`;
 }
 
-// ================= GENERIC TABLE =================
+// ============ GENERIC TABLE ============
 function renderGenericTable() {
     const div = document.getElementById('dynamicTable');
     if (!currentData.length) {
@@ -1218,11 +1240,8 @@ function renderGenericTable() {
     document.getElementById('recordCount').textContent = `(${currentData.length})`;
 }
 
-// ================= EDIT =================
-function startEdit(symbol, date) {
-    editingRow = { symbol, date };
-    renderCurrentTab();
-}
+// ============ EDIT ============
+function startEdit(symbol, date) { editingRow = { symbol, date }; renderCurrentTab(); }
 function cancelEdit() { editingRow = null; renderCurrentTab(); }
 async function saveEdit(symbol, date) {
     const safeId = symbol.replace(/[^A-Z0-9]/gi, '_');
@@ -1238,7 +1257,7 @@ async function saveEdit(symbol, date) {
     loadCurrentTab();
 }
 
-// ================= TRADE MODAL =================
+// ============ TRADE MODAL ============
 function openTradeModal() {
     document.getElementById('tradeModal').classList.add('open');
     loadTradeSymbols();
@@ -1339,15 +1358,15 @@ async function openTradeForSymbol(sym) {
     openTradeModal();
 }
 
-// ================= ALERT MODAL =================
+// ============ ALERT MODAL ============
 function loadAlertRules() {
     try {
-        alertRules = JSON.parse(localStorage.getItem('ltpAlertRules_v24') || '[]');
+        alertRules = JSON.parse(localStorage.getItem('ltpAlertRules_v25') || '[]');
     } catch (e) { alertRules = []; }
     updateAlertBar();
 }
 function saveAlertRules() {
-    localStorage.setItem('ltpAlertRules_v24', JSON.stringify(alertRules));
+    localStorage.setItem('ltpAlertRules_v25', JSON.stringify(alertRules));
     updateAlertBar();
     renderCurrentTab();
 }
@@ -1412,7 +1431,7 @@ function removeAlertRule(i) {
     saveAlertRules();
 }
 
-// ================= DELETE =================
+// ============ DELETE ============
 async function deleteRecord(symbol, date) {
     if (!confirm(`Delete ${symbol} (${date})?`)) return;
     await fetch(`/api/delete-signal?collection=${COLLECTION_MAP[currentTab]}&symbol=${symbol}&date=${date}`, { method: 'DELETE' });
