@@ -563,7 +563,96 @@ async def api_signals(
 
     return {"data": data}
 
+@app.get("/api/debug-parse")
+async def api_debug_parse():
+    """Direct debug: fetch + parse + return detail."""
+    import traceback
+    result = {
+        "fetch_ok": False,
+        "html_length": 0,
+        "tickerInitial_found": False,
+        "regex_match": False,
+        "json_parsed": False,
+        "symbols_extracted": 0,
+        "first_5_symbols": {},
+        "header_time": None,
+        "error": None,
+    }
+    try:
+        html, code, err = fetch_dse_page()
+        if html is None:
+            result["error"] = f"fetch failed: {err}"
+            return result
 
+        result["fetch_ok"] = True
+        result["html_length"] = len(html)
+        result["tickerInitial_found"] = "tickerInitial" in html
+
+        # Try regex
+        m = re.search(r'"tickerInitial"\s*:\s*(\[[^\]]*\])', html)
+        result["regex_match"] = m is not None
+
+        if m:
+            raw = m.group(1)
+            result["raw_first_200"] = raw[:200]
+            try:
+                raw_decoded = raw.encode('utf-8').decode('unicode_escape')
+                result["decoded_first_200"] = raw_decoded[:200]
+            except Exception as e:
+                result["decode_error"] = str(e)
+                raw_decoded = raw
+
+            try:
+                tickers = json.loads(raw_decoded)
+                result["json_parsed"] = True
+                result["tickers_count"] = len(tickers)
+
+                # Extract symbols
+                ltp = {}
+                for t in tickers:
+                    sym = t.get('code')
+                    price = t.get('price')
+                    if not sym or price in (None, ''):
+                        continue
+                    try:
+                        p = float(str(price).replace(',', '').strip())
+                        if 0 < p < 100000:
+                            ltp[sym.upper().strip()] = p
+                    except (ValueError, TypeError):
+                        continue
+                result["symbols_extracted"] = len(ltp)
+                result["first_5_symbols"] = dict(list(ltp.items())[:5])
+            except Exception as e:
+                result["json_error"] = str(e)
+                result["json_error_trace"] = traceback.format_exc()[-500:]
+
+        # Header time
+        dse_time = parse_dse_header_time(html)
+        result["header_time"] = dse_time.strftime('%Y-%m-%d %H:%M:%S') if dse_time else None
+
+        # Look for actual header patterns (debug)
+        patterns_found = []
+        for pat in [
+            r'On\s+\w+\s+\d{1,2},\s+\d{4}\s+at\s+\d{1,2}:\d{2}\s*[AP]M',
+            r'On\s+\w+,\s+\w+\s+\d{1,2},\s+\d{4}\s+at\s+\d{1,2}:\d{2}\s*[AP]M',
+            r'On\s+[^<]{5,60}at\s+\d{1,2}:\d{2}',
+        ]:
+            mm = re.search(pat, html)
+            if mm:
+                patterns_found.append(mm.group(0))
+
+        result["header_patterns_found"] = patterns_found
+
+        # Look for what's actually around 'Market closed'
+        idx = html.find('Market closed')
+        if idx > -1:
+            result["market_closed_context"] = html[max(0, idx-100):idx+150]
+
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
+        result["trace"] = traceback.format_exc()[-1000:]
+
+    return result
 @app.get("/api/generic-data")
 async def api_generic(
     collection: str = Query(...), date: str = Query(None), symbol: str = Query(None),
