@@ -346,14 +346,13 @@ def detect_market_status_from_text(html_text):
 
 
 def is_market_open_fallback_time(dse_time):
-dataif dse_time is None:
+    if dse_time is None:
         return None
     wd = dse_time.weekday()
     if wd in (4, 5):
         return False
     mins = dse_time.hour * 60 + dse_time.minute
     return 10 * 60 <= mins <= 14 * 60 + 20
-
 
 # =========================================
 # LTP Cache
