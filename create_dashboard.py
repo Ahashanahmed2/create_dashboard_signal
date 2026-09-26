@@ -137,36 +137,56 @@ def fetch_dse_page():
 # =========================================
 def parse_ticker_initial(html_text):
     """
-    new.dsebd.org embeds:
-      "tickerInitial":[{"code":"...","price":"...","change":..,"delta":..}, ...]
-    HTML-এ escaped quotes থাকে — robust ভাবে handle করি।
+    new.dsebd.org Next.js __next_f block-এ data double-escaped JSON string আকারে থাকে:
+      \\"tickerInitial\\":[{\\"code\\":\\"1JANATAMF\\",\\"price\\":\\"3.70\\",...}]
+    
+    Strategy:
+      1. 'tickerInitial' খুঁজি (backslash optional)
+      2. তারপরে `[` থেকে `]` পর্যন্ত extract
+      3. Escapes unescape করি
+      4. json.loads
     """
     ltp_data = {}
     if not html_text:
         print("[LTP] ❌ html_text empty")
         return ltp_data
 
-    # Step 1: tickerInitial খুঁজি
-    idx = html_text.find('"tickerInitial"')
-    if idx == -1:
-        idx = html_text.find('tickerInitial')
-    if idx == -1:
+    # Step 1: tickerInitial খুঁজি (backslash-optional)
+    m = re.search(r'tickerInitial', html_text)
+    if not m:
         print("[LTP] ❌ tickerInitial not found")
         return ltp_data
 
+    idx = m.start()
     print(f"[LTP] ✅ tickerInitial found at index {idx}")
 
-    # Step 2: '[' খুঁজি tickerInitial এর পরে
-    bracket_start = html_text.find('[', idx)
+    # Step 2: '[' খুঁজি tickerInitial-এর পরে 200 chars-এর মধ্যে
+    bracket_start = html_text.find('[', idx, min(len(html_text), idx + 200))
     if bracket_start == -1:
         print("[LTP] ❌ no '[' after tickerInitial")
         return ltp_data
 
-    # Step 3: matching ']' খুঁজি (bracket counting)
+    # Step 3: matching ']' bracket counting দিয়ে
     depth = 0
     bracket_end = -1
+    in_string = False
+    escape_next = False
+    
     for i in range(bracket_start, min(len(html_text), bracket_start + 500000)):
         c = html_text[i]
+        
+        if escape_next:
+            escape_next = False
+            continue
+        if c == '\\':
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        
         if c == '[':
             depth += 1
         elif c == ']':
@@ -181,43 +201,52 @@ def parse_ticker_initial(html_text):
 
     raw = html_text[bracket_start:bracket_end + 1]
     print(f"[LTP] extracted raw length: {len(raw)}")
-    print(f"[LTP] raw first 150: {raw[:150]}")
+    print(f"[LTP] raw first 200: {raw[:200]}")
 
-    # Step 4: decode escapes safely
-    # DSE HTML-এ JS string-এর ভিতরে থাকে — escaped quotes handle করি
-    decoded = raw
+    # Step 4: Escapes unescape + json.loads
+    tickers = None
+
+    # Method A: direct json.loads (if not escaped)
     try:
-        # Method A: direct json.loads (no decode needed)
-        tickers = json.loads(decoded)
-        print(f"[LTP] ✅ Direct json.loads succeeded: {len(tickers)} entries")
-    except json.JSONDecodeError as e1:
-        print(f"[LTP] direct json.loads failed: {e1}")
-        # Method B: unicode_escape decode
-        try:
-            decoded2 = raw.encode('utf-8').decode('unicode_escape')
-            tickers = json.loads(decoded2)
-            print(f"[LTP] ✅ After unicode_escape: {len(tickers)} entries")
-        except Exception as e2:
-            print(f"[LTP] unicode_escape method failed: {e2}")
-            # Method C: regex-based manual extraction (fallback)
-            try:
-                tickers = []
-                for m in re.finditer(
-                    r'\{\s*\\?"code\\?"\s*:\s*\\?"([A-Z0-9]+)\\?"\s*,\s*'
-                    r'\\?"price\\?"\s*:\s*\\?"([\d.,]+)\\?"',
-                    raw
-                ):
-                    tickers.append({"code": m.group(1), "price": m.group(2)})
-                if tickers:
-                    print(f"[LTP] ✅ Regex fallback: {len(tickers)} entries")
-                else:
-                    print("[LTP] ❌ all parse methods failed")
-                    return ltp_data
-            except Exception as e3:
-                print(f"[LTP] ❌ regex fallback failed: {e3}")
-                return ltp_data
+        tickers = json.loads(raw)
+        print(f"[LTP] ✅ Direct json.loads: {len(tickers)} entries")
+    except json.JSONDecodeError as e:
+        print(f"[LTP] direct json.loads failed: {e}")
 
-    # Step 5: extract symbols
+    # Method B: unescape \\\" → \" তারপর json.loads
+    if tickers is None:
+        try:
+            cleaned = raw.replace('\\"', '"').replace('\\\\', '\\')
+            tickers = json.loads(cleaned)
+            print(f"[LTP] ✅ After unescape: {len(tickers)} entries")
+        except json.JSONDecodeError as e:
+            print(f"[LTP] unescape method failed: {e}")
+
+    # Method C: unicode_escape decode
+    if tickers is None:
+        try:
+            decoded = raw.encode('utf-8').decode('unicode_escape')
+            tickers = json.loads(decoded)
+            print(f"[LTP] ✅ After unicode_escape: {len(tickers)} entries")
+        except Exception as e:
+            print(f"[LTP] unicode_escape method failed: {e}")
+
+    # Method D: regex fallback — সরাসরি code/price pair বের করি
+    if tickers is None:
+        print("[LTP] trying regex fallback...")
+        tickers = []
+        # Both \"code\":\"X\" and "code":"X" handle করি
+        pattern = r'code\\?"\s*:\s*\\?"([A-Z0-9&._-]+)\\?"\s*,\s*\\?"price\\?"\s*:\s*\\?"([\d.,]+)\\?"'
+        for match in re.finditer(pattern, raw):
+            tickers.append({"code": match.group(1), "price": match.group(2)})
+        if tickers:
+            print(f"[LTP] ✅ Regex fallback: {len(tickers)} entries")
+        else:
+            print("[LTP] ❌ all parse methods failed")
+            print(f"[LTP] raw dump first 500: {raw[:500]}")
+            return ltp_data
+
+    # Step 5: symbols extract
     for t in tickers:
         sym = t.get('code')
         price = t.get('price')
@@ -234,30 +263,73 @@ def parse_ticker_initial(html_text):
     if ltp_data:
         print(f"✅ [LTP] sample: {list(ltp_data.items())[:5]}")
     return ltp_data
+    
 
 # =========================================
 # Market status — from DSE header time (NO UTC+6)
 # =========================================
+
 def parse_dse_header_time(html_text):
+    """
+    Header time escaped JSON-এও থাকতে পারে।
+    e.g. On Sep 26, 2026 at 4:58 AM
+    """
     if not html_text:
         return None
 
+    # Normal + escaped patterns
     patterns = [
-        r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[AP]M)',
-        r'On\s+\w+,\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[AP]M)',
-        r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2})',
+        # Normal
+        (r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[AP]M)', "%b %d, %Y %I:%M %p"),
+        (r'On\s+\w+,\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[AP]M)', "%B %d, %Y %I:%M %p"),
+        (r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2})', "%b %d, %Y %H:%M"),
+        # Escaped (\\" style)
+        (r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2})\s*([AP]M)?', "%b %d, %Y %I:%M %p"),
     ]
-    formats = ["%b %d, %Y %I:%M %p", "%B %d, %Y %I:%M %p", "%b %d, %Y %H:%M"]
 
-    for pat, fmt in zip(patterns, formats):
-        m = re.search(pat, html_text)
-        if m:
-            try:
-                return datetime.strptime(f"{m.group(1)} {m.group(2)}", fmt)
-            except ValueError:
-                continue
+    # First: try unescape whole HTML
+    try:
+        # If HTML has lots of \" try unescaping a copy
+        if html_text.count('\\"') > 100:
+            test_html = html_text.replace('\\"', '"').replace('\\\\', '\\')
+        else:
+            test_html = html_text
+    except Exception:
+        test_html = html_text
+
+    for pat, fmt in patterns:
+        for src in [html_text, test_html]:
+            m = re.search(pat, src)
+            if m:
+                try:
+                    if len(m.groups()) == 3 and m.group(3):
+                        # 12-hour with AM/PM separately
+                        time_str = f"{m.group(2)} {m.group(3)}"
+                        return datetime.strptime(f"{m.group(1)} {time_str}", fmt)
+                    else:
+                        return datetime.strptime(f"{m.group(1)} {m.group(2)}", fmt)
+                except ValueError:
+                    continue
+
+    # Fallback: search a broader window
+    # Sometimes date is separated from time
+    m = re.search(r'(\w+\s+\d{1,2},\s+\d{4})', test_html)
+    if m:
+        date_str = m.group(1)
+        # Look for time nearby (±200 chars)
+        for i in [m.start(), m.end()]:
+            window = test_html[max(0, i-50):i+200]
+            tm = re.search(r'(\d{1,2}:\d{2}\s*[AP]M)', window)
+            if tm:
+                try:
+                    return datetime.strptime(f"{date_str} {tm.group(1)}", "%b %d, %Y %I:%M %p")
+                except ValueError:
+                    try:
+                        return datetime.strptime(f"{date_str} {tm.group(1)}", "%B %d, %Y %I:%M %p")
+                    except ValueError:
+                        continue
+
     return None
-
 
 def detect_market_status_from_text(html_text):
     if not html_text:
