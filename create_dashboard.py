@@ -139,42 +139,101 @@ def parse_ticker_initial(html_text):
     """
     new.dsebd.org embeds:
       "tickerInitial":[{"code":"...","price":"...","change":..,"delta":..}, ...]
+    HTML-এ escaped quotes থাকে — robust ভাবে handle করি।
     """
     ltp_data = {}
     if not html_text:
+        print("[LTP] ❌ html_text empty")
         return ltp_data
 
+    # Step 1: tickerInitial খুঁজি
+    idx = html_text.find('"tickerInitial"')
+    if idx == -1:
+        idx = html_text.find('tickerInitial')
+    if idx == -1:
+        print("[LTP] ❌ tickerInitial not found")
+        return ltp_data
+
+    print(f"[LTP] ✅ tickerInitial found at index {idx}")
+
+    # Step 2: '[' খুঁজি tickerInitial এর পরে
+    bracket_start = html_text.find('[', idx)
+    if bracket_start == -1:
+        print("[LTP] ❌ no '[' after tickerInitial")
+        return ltp_data
+
+    # Step 3: matching ']' খুঁজি (bracket counting)
+    depth = 0
+    bracket_end = -1
+    for i in range(bracket_start, min(len(html_text), bracket_start + 500000)):
+        c = html_text[i]
+        if c == '[':
+            depth += 1
+        elif c == ']':
+            depth -= 1
+            if depth == 0:
+                bracket_end = i
+                break
+
+    if bracket_end == -1:
+        print("[LTP] ❌ no matching ']' found")
+        return ltp_data
+
+    raw = html_text[bracket_start:bracket_end + 1]
+    print(f"[LTP] extracted raw length: {len(raw)}")
+    print(f"[LTP] raw first 150: {raw[:150]}")
+
+    # Step 4: decode escapes safely
+    # DSE HTML-এ JS string-এর ভিতরে থাকে — escaped quotes handle করি
+    decoded = raw
     try:
-        m = re.search(r'"tickerInitial"\s*:\s*(\[[^\]]*\])', html_text)
-        if not m:
-            print("[LTP] ❌ tickerInitial not found in HTML")
-            return ltp_data
-
-        raw = m.group(1)
+        # Method A: direct json.loads (no decode needed)
+        tickers = json.loads(decoded)
+        print(f"[LTP] ✅ Direct json.loads succeeded: {len(tickers)} entries")
+    except json.JSONDecodeError as e1:
+        print(f"[LTP] direct json.loads failed: {e1}")
+        # Method B: unicode_escape decode
         try:
-            raw = raw.encode('utf-8').decode('unicode_escape')
-        except Exception:
-            pass
-
-        tickers = json.loads(raw)
-        for t in tickers:
-            sym = t.get('code')
-            price = t.get('price')
-            if not sym or price in (None, ''):
-                continue
+            decoded2 = raw.encode('utf-8').decode('unicode_escape')
+            tickers = json.loads(decoded2)
+            print(f"[LTP] ✅ After unicode_escape: {len(tickers)} entries")
+        except Exception as e2:
+            print(f"[LTP] unicode_escape method failed: {e2}")
+            # Method C: regex-based manual extraction (fallback)
             try:
-                ltp = float(str(price).replace(',', '').strip())
-                if 0 < ltp < 100000:
-                    ltp_data[sym.upper().strip()] = ltp
-            except (ValueError, TypeError):
-                continue
+                tickers = []
+                for m in re.finditer(
+                    r'\{\s*\\?"code\\?"\s*:\s*\\?"([A-Z0-9]+)\\?"\s*,\s*'
+                    r'\\?"price\\?"\s*:\s*\\?"([\d.,]+)\\?"',
+                    raw
+                ):
+                    tickers.append({"code": m.group(1), "price": m.group(2)})
+                if tickers:
+                    print(f"[LTP] ✅ Regex fallback: {len(tickers)} entries")
+                else:
+                    print("[LTP] ❌ all parse methods failed")
+                    return ltp_data
+            except Exception as e3:
+                print(f"[LTP] ❌ regex fallback failed: {e3}")
+                return ltp_data
 
-        print(f"✅ [LTP] parsed {len(ltp_data)} symbols from tickerInitial")
-    except Exception as e:
-        print(f"[LTP] parse error: {type(e).__name__}: {e}")
+    # Step 5: extract symbols
+    for t in tickers:
+        sym = t.get('code')
+        price = t.get('price')
+        if not sym or price in (None, ''):
+            continue
+        try:
+            ltp = float(str(price).replace(',', '').strip())
+            if 0 < ltp < 100000:
+                ltp_data[sym.upper().strip()] = ltp
+        except (ValueError, TypeError):
+            continue
 
+    print(f"✅ [LTP] parsed {len(ltp_data)} symbols")
+    if ltp_data:
+        print(f"✅ [LTP] sample: {list(ltp_data.items())[:5]}")
     return ltp_data
-
 
 # =========================================
 # Market status — from DSE header time (NO UTC+6)
@@ -215,7 +274,7 @@ def detect_market_status_from_text(html_text):
 
 
 def is_market_open_fallback_time(dse_time):
-    if dse_time is None:
+dataif dse_time is None:
         return None
     wd = dse_time.weekday()
     if wd in (4, 5):
@@ -246,12 +305,19 @@ def _refresh_ltp_cache(force=False):
         if age < max_age and ltp_cache["ltp_data"]:
             return True
 
+    print("=" * 60)
+    print("[refresh] Starting DSE fetch...")
+
     html, code, err = fetch_dse_page()
     if html is None:
-        print(f"[LTP] fetch failed: {err}")
+        print(f"[refresh] ❌ fetch failed: {err}")
         return False
 
+    print(f"[refresh] ✅ html fetched: {len(html)} bytes")
+
     ltp_data = parse_ticker_initial(html)
+    print(f"[refresh] parsed LTP: {len(ltp_data)} symbols")
+
     dse_time = parse_dse_header_time(html)
     is_open_text, next_open = detect_market_status_from_text(html)
 
@@ -260,6 +326,19 @@ def _refresh_ltp_cache(force=False):
     else:
         is_open = is_market_open_fallback_time(dse_time)
 
+    # ✅ CRITICAL: only update cache if parse succeeded
+    if not ltp_data:
+        print("[refresh] ⚠️ parse returned 0 — NOT overwriting cache with empty")
+        # যদি আগে ভালো data থাকে, রাখি
+        if ltp_cache["ltp_data"]:
+            print(f"[refresh] keeping previous cache: {len(ltp_cache['ltp_data'])} symbols")
+            return False
+        # না থাকলে empty রাখি
+        ltp_cache["html"] = html
+        ltp_cache["fetched_at"] = now
+        print("[refresh] ❌ no data at all")
+        return False
+
     ltp_cache["html"] = html
     ltp_cache["ltp_data"] = ltp_data
     ltp_cache["fetched_at"] = now
@@ -267,7 +346,8 @@ def _refresh_ltp_cache(force=False):
     ltp_cache["is_open"] = bool(is_open)
     ltp_cache["next_open"] = next_open
 
-    print(f"🔄 [cache] LTP={len(ltp_data)} | DSE time={ltp_cache['dse_time_str']} | open={is_open}")
+    print(f"🔄 [cache] LTP={len(ltp_data)} | time={ltp_cache['dse_time_str']} | open={is_open}")
+    print("=" * 60)
     return True
 
 
