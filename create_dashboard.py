@@ -269,67 +269,51 @@ def parse_ticker_initial(html_text):
 # Market status — from DSE header time (NO UTC+6)
 # =========================================
 
+
 def parse_dse_header_time(html_text):
     """
-    Header time escaped JSON-এও থাকতে পারে।
-    e.g. On Sep 26, 2026 at 4:58 AM
+    নতুন DSE site header time:
+      "20:10 BST" → current DSE time
+      "· Opens Sun, 27 Sept, 10:00 · in 451d 13h" → next open
+      "Market closed" / "Market open" → status
+    
+    Returns dict with:
+      - current_time_bst: str like "20:10" (or None)
+      - market_status: "open" or "closed" (or None)
+      - next_open: str like "Sun, 27 Sept, 10:00" (or None)
+      - countdown: str like "in 451d 13h" (or None)
     """
+    result = {
+        "current_time_bst": None,
+        "market_status": None,
+        "next_open": None,
+        "countdown": None,
+    }
     if not html_text:
-        return None
+        return result
 
-    # Normal + escaped patterns
-    patterns = [
-        # Normal
-        (r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[AP]M)', "%b %d, %Y %I:%M %p"),
-        (r'On\s+\w+,\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[AP]M)', "%B %d, %Y %I:%M %p"),
-        (r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2})', "%b %d, %Y %H:%M"),
-        # Escaped (\\" style)
-        (r'On\s+(\w+\s+\d{1,2},\s+\d{4})\s+at\s+(\d{1,2}:\d{2})\s*([AP]M)?', "%b %d, %Y %I:%M %p"),
-    ]
-
-    # First: try unescape whole HTML
-    try:
-        # If HTML has lots of \" try unescaping a copy
-        if html_text.count('\\"') > 100:
-            test_html = html_text.replace('\\"', '"').replace('\\\\', '\\')
-        else:
-            test_html = html_text
-    except Exception:
-        test_html = html_text
-
-    for pat, fmt in patterns:
-        for src in [html_text, test_html]:
-            m = re.search(pat, src)
-            if m:
-                try:
-                    if len(m.groups()) == 3 and m.group(3):
-                        # 12-hour with AM/PM separately
-                        time_str = f"{m.group(2)} {m.group(3)}"
-                        return datetime.strptime(f"{m.group(1)} {time_str}", fmt)
-                    else:
-                        return datetime.strptime(f"{m.group(1)} {m.group(2)}", fmt)
-                except ValueError:
-                    continue
-
-    # Fallback: search a broader window
-    # Sometimes date is separated from time
-    m = re.search(r'(\w+\s+\d{1,2},\s+\d{4})', test_html)
+    # 1. Current time — "20:10 BST" pattern
+    m = re.search(r'>(\d{1,2}:\d{2})\s*BST<', html_text)
     if m:
-        date_str = m.group(1)
-        # Look for time nearby (±200 chars)
-        for i in [m.start(), m.end()]:
-            window = test_html[max(0, i-50):i+200]
-            tm = re.search(r'(\d{1,2}:\d{2}\s*[AP]M)', window)
-            if tm:
-                try:
-                    return datetime.strptime(f"{date_str} {tm.group(1)}", "%b %d, %Y %I:%M %p")
-                except ValueError:
-                    try:
-                        return datetime.strptime(f"{date_str} {tm.group(1)}", "%B %d, %Y %I:%M %p")
-                    except ValueError:
-                        continue
+        result["current_time_bst"] = m.group(1)
 
-    return None
+    # 2. Market status
+    if re.search(r'Market\s+closed', html_text, re.IGNORECASE):
+        result["market_status"] = "closed"
+    elif re.search(r'Market\s+open', html_text, re.IGNORECASE):
+        result["market_status"] = "open"
+
+    # 3. Next open: "· Opens Sun, 27 Sept, 10:00 · in 451d 13h"
+    m = re.search(r'·\s*Opens\s+([A-Za-z]+,\s*\d{1,2}\s+[A-Za-z]+,\s*\d{1,2}:\d{2})', html_text)
+    if m:
+        result["next_open"] = m.group(1).strip()
+
+    # 4. Countdown: "in 451d 13h"
+    m = re.search(r'in\s+(\d+d\s+\d+h(?:\s+\d+m)?)', html_text)
+    if m:
+        result["countdown"] = m.group(1).strip()
+
+    return result
 
 def detect_market_status_from_text(html_text):
     if not html_text:
@@ -366,60 +350,76 @@ ltp_cache = {
     "next_open": None,
 }
 
-
 def _refresh_ltp_cache(force=False):
     now = datetime.now()
-
     if not force and ltp_cache["fetched_at"]:
         age = (now - ltp_cache["fetched_at"]).total_seconds()
         max_age = 60 if ltp_cache["is_open"] else 300
         if age < max_age and ltp_cache["ltp_data"]:
             return True
 
-    print("=" * 60)
-    print("[refresh] Starting DSE fetch...")
-
     html, code, err = fetch_dse_page()
     if html is None:
-        print(f"[refresh] ❌ fetch failed: {err}")
         return False
 
-    print(f"[refresh] ✅ html fetched: {len(html)} bytes")
-
     ltp_data = parse_ticker_initial(html)
-    print(f"[refresh] parsed LTP: {len(ltp_data)} symbols")
-
-    dse_time = parse_dse_header_time(html)
-    is_open_text, next_open = detect_market_status_from_text(html)
-
-    if is_open_text is not None:
-        is_open = is_open_text
+    
+    # ✅ NEW: parse header info
+    header_info = parse_dse_header_time(html)
+    
+    # current DSE time from HTML (if available), else local Dhaka time
+    from zoneinfo import ZoneInfo
+    try:
+        dhaka_now = datetime.now(ZoneInfo("Asia/Dhaka"))
+    except Exception:
+        dhaka_now = datetime.now()
+    
+    # Build display time string
+    if header_info["current_time_bst"]:
+        # "20:10" → "2026-09-26 20:10:00" (today's date + DSE time)
+        today = dhaka_now.strftime("%Y-%m-%d")
+        dse_time_str = f"{today} {header_info['current_time_bst']}:00"
     else:
-        is_open = is_market_open_fallback_time(dse_time)
+        dse_time_str = dhaka_now.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Market open determination
+    if header_info["market_status"] == "open":
+        is_open = True
+    elif header_info["market_status"] == "closed":
+        is_open = False
+    else:
+        # Fallback: time-based
+        wd = dhaka_now.weekday()
+        mins = dhaka_now.hour * 60 + dhaka_now.minute
+        is_open = (wd not in (4, 5)) and (10 * 60 <= mins <= 14 * 60 + 20)
+    
+    # next_open from HTML, else compute
+    next_open = header_info["next_open"]
+    if not next_open and not is_open:
+        wd = dhaka_now.weekday()
+        if wd in (4, 5):
+            next_open = "Sunday 10:00 AM"
+        elif dhaka_now.hour >= 15:
+            next_open = "Tomorrow 10:00 AM"
+        else:
+            next_open = "Today 10:00 AM"
 
-    # ✅ CRITICAL: only update cache if parse succeeded
-    if not ltp_data:
-        print("[refresh] ⚠️ parse returned 0 — NOT overwriting cache with empty")
-        # যদি আগে ভালো data থাকে, রাখি
-        if ltp_cache["ltp_data"]:
-            print(f"[refresh] keeping previous cache: {len(ltp_cache['ltp_data'])} symbols")
-            return False
-        # না থাকলে empty রাখি
-        ltp_cache["html"] = html
-        ltp_cache["fetched_at"] = now
-        print("[refresh] ❌ no data at all")
+    if not ltp_data and ltp_cache["ltp_data"]:
+        print("[refresh] ⚠️ parse=0, keeping previous cache")
         return False
 
     ltp_cache["html"] = html
     ltp_cache["ltp_data"] = ltp_data
     ltp_cache["fetched_at"] = now
-    ltp_cache["dse_time_str"] = dse_time.strftime('%Y-%m-%d %H:%M:%S') if dse_time else None
+    ltp_cache["dse_time_str"] = dse_time_str
     ltp_cache["is_open"] = bool(is_open)
     ltp_cache["next_open"] = next_open
 
-    print(f"🔄 [cache] LTP={len(ltp_data)} | time={ltp_cache['dse_time_str']} | open={is_open}")
-    print("=" * 60)
+    print(f"🔄 [cache] LTP={len(ltp_data)} | time={dse_time_str} | open={is_open} | status={header_info['market_status']}")
+    if header_info["next_open"]:
+        print(f"   next_open={header_info['next_open']} · {header_info.get('countdown', '')}")
     return True
+
 
 
 # =========================================
