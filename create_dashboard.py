@@ -974,6 +974,55 @@ async def api_debug_parse():
         result["trace"] = traceback.format_exc()[-800:]
 
     return result
+
+@app.get("/api/debug-header-time")
+async def api_debug_header_time():
+    """
+    Header time কোথায় আছে সেটা সরাসরি দেখাই।
+    """
+    html, code, err = fetch_dse_page()
+    if html is None:
+        return {"error": err}
+
+    result = {
+        "html_length": len(html),
+        "search_patterns": {},
+    }
+
+    # Search various patterns
+    for name, pattern in [
+        ("On_<date>_at_<time>", r'On\s+[^<"\n]{5,80}'),
+        ("at_<time>", r'at\s+\d{1,2}:\d{2}\s*[APap][Mm]'),
+        ("time_only", r'\d{1,2}:\d{2}\s*[APap][Mm]'),
+        ("Sept_or_Sep", r'(Sep|Sept)\w*\s+\d{1,2},?\s+\d{4}'),
+        ("BST", r'BST'),
+        ("as_of", r'as\s+of\s+[^<"\n]{5,80}'),
+        ("server_time", r'server\s*time[^<"\n]{0,60}'),
+        ("Last_updated", r'[Ll]ast\s+[Uu]pdate[^<"\n]{0,60}'),
+    ]:
+        matches = []
+        for m in re.finditer(pattern, html[:200000]):
+            matches.append(m.group(0)[:80])
+            if len(matches) >= 5:
+                break
+        result["search_patterns"][name] = matches
+
+    # Context around "Latest Share Price"
+    idx = html.find("Latest Share Price")
+    if idx > -1:
+        result["latest_share_price_context"] = html[idx:idx+500]
+
+    # Context around "Market closed"
+    idx = html.find("Market closed")
+    if idx > -1:
+        result["market_closed_context"] = html[max(0, idx-200):idx+200]
+
+    # Context around "DSEX"
+    idx = html.find("DSEX")
+    if idx > -1:
+        result["DSEX_context"] = html[max(0, idx-300):idx+300]
+
+    return result
 # =========================================
 # Dashboard HTML
 # =========================================
