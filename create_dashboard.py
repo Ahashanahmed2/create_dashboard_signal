@@ -546,10 +546,20 @@ async def api_debug_html():
 # =========================================
 @app.get("/api/market-status")
 async def api_market_status():
-    _refresh_ltp_cache()
-    dse_time_str = ltp_cache["dse_time_str"]
-    is_open = ltp_cache["is_open"]
-    next_open = ltp_cache["next_open"]
+    try:
+        _refresh_ltp_cache()
+    except Exception as e:
+        print(f"[market-status] refresh error: {e}")
+
+    try:
+        dse_time_str = ltp_cache.get("dse_time_str")
+        is_open = ltp_cache.get("is_open")
+        next_open = ltp_cache.get("next_open")
+    except Exception as e:
+        print(f"[market-status] cache read error: {e}")
+        dse_time_str = None
+        is_open = False
+        next_open = None
 
     alert_10min = False
     if is_open and dse_time_str:
@@ -559,7 +569,7 @@ async def api_market_status():
             sec_to_close = (close_dt - dt).total_seconds()
             alert_10min = 0 < sec_to_close <= 600
         except Exception:
-            pass
+            alert_10min = False
 
     if not next_open and dse_time_str and not is_open:
         try:
@@ -580,6 +590,7 @@ async def api_market_status():
         "alert_message": "⚠️ DSE CLOSING IN 10 MINUTES!" if alert_10min else "",
         "next_open": next_open,
         "dse_time": dse_time_str or "unknown",
+        "ltp_symbols": len(ltp_cache.get("ltp_data", {})),
         "source": "new.dsebd.org",
     }
 
@@ -907,7 +918,62 @@ async def api_collection_symbols(collection: str = Query(...), date: str = Query
     symbols = col.distinct('symbol', query)
     return sorted([s for s in symbols if s])
 
+@app.get("/api/debug-parse")
+async def api_debug_parse():
+    """Direct debug."""
+    import traceback
+    result = {}
+    try:
+        html, code, err = fetch_dse_page()
+        if html is None:
+            return {"error": f"fetch failed: {err}"}
 
+        result["html_length"] = len(html)
+
+        # ✅ header time related debug
+        result["has_tickerInitial"] = "tickerInitial" in html
+        result["has_market_closed"] = "Market closed" in html
+        result["has_market_open"] = "Market open" in html
+
+        # Search for likely time patterns
+        idx = html.find("On ")
+        if idx > -1:
+            result["On_context"] = html[max(0, idx-50):idx+150]
+
+        # Look for "Latest Share Price" section
+        idx = html.find("Latest Share Price")
+        if idx > -1:
+            result["latest_share_context"] = html[max(0, idx-100):idx+300]
+
+        # Extract all datetime-looking substrings
+        time_matches = []
+        for pat in [
+            r'\d{1,2}:\d{2}\s*[AP]M',
+            r'\d{1,2}:\d{2}\s*[APap][Mm]',
+            r'On\s+[^"]{5,80}',
+            r'as\s+of\s+[^"]{5,80}',
+        ]:
+            for m in re.finditer(pat, html[:100000]):  # first 100KB
+                time_matches.append(m.group(0)[:100])
+                if len(time_matches) > 20:
+                    break
+
+        result["time_like_matches"] = time_matches[:20]
+
+        # Parse result
+        dse_time = parse_dse_header_time(html)
+        result["parsed_header_time"] = dse_time.strftime('%Y-%m-%d %H:%M:%S') if dse_time else None
+
+        # LTP check
+        ltp_data = parse_ticker_initial(html)
+        result["ltp_symbols"] = len(ltp_data)
+        result["ltp_first_5"] = dict(list(ltp_data.items())[:5])
+
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
+        result["trace"] = traceback.format_exc()[-800:]
+
+    return result
 # =========================================
 # Dashboard HTML
 # =========================================
@@ -1115,6 +1181,7 @@ function debounceLoad() {
 async function checkMarketStatus() {
     try {
         const r = await fetch('/api/market-status');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const s = await r.json();
         lastMarketStatus = s;
         const el = document.getElementById('marketStatus');
@@ -1122,12 +1189,15 @@ async function checkMarketStatus() {
             el.innerHTML = `<span class="refresh-dot"></span>🟢 DSE OPEN · <b>${s.dse_time}</b>`;
         } else {
             const next = s.next_open ? ` · Opens ${s.next_open}` : '';
-            el.innerHTML = `🔴 DSE CLOSED${next} · Last: <b>${s.dse_time}</b>`;
+            el.innerHTML = `🔴 DSE CLOSED${next} · Last: <b>${s.dse_time || 'unknown'}</b>`;
         }
-        document.getElementById('alertBox').style.display = s.alert_10min ? 'block' : 'none';
+        const alertBox = document.getElementById('alertBox');
+        alertBox.style.display = (s.alert_10min === true) ? 'block' : 'none';
     } catch (e) {
-        console.error('market-status', e);
-        document.getElementById('marketStatus').textContent = '⚠️ DSE status fetch failed';
+        console.error('market-status error:', e);
+        document.getElementById('marketStatus').innerHTML =
+            `⚠️ Market status unavailable (${e.message}) · LTP active`;
+        document.getElementById('alertBox').style.display = 'none';
     }
 }
 
